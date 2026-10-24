@@ -38,3 +38,4 @@ The frontend calls the backend under `/api/*`, proxied to `localhost:8080` in de
 1. Start the backend: `cd autoscript && ./mvnw spring-boot:run`
 2. Start the frontend: `cd autoscript-ui && npm run dev`
 3. Open the URL printed by the Vite dev server.
+
