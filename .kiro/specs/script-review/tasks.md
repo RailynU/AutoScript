@@ -1,20 +1,24 @@
 # Implementation Plan — AutoScript Prescription Review
 
 This plan reflects a codebase where the backend REST API is already implemented and the
-frontend does not exist yet. Backend tasks are framed as "document and harden with tests"
-to lock in current behavior; frontend tasks build the missing client. Each task references
-the requirements it satisfies.
+`autoscript-ui` React project is scaffolded but its UI is not yet built. Backend tasks are
+framed as "document and harden with tests" to lock in current behavior; frontend tasks
+build the missing client. Each task references the requirements it satisfies.
+
+Backend status: all backend tasks (1–7) are complete. The suite has 48 passing tests
+(`./mvnw test`); run with `-Dspring.ai.openai.api-key=<any-value>` so the OpenAI
+auto-configuration has a key at context load.
 
 ## Backend — lock in current behavior with tests
 
-- [ ] 1. Add test scaffolding and shared fixtures
+- [x] 1. Add test scaffolding and shared fixtures
   - Create a test support class with builders for `ScriptData` (matching, mismatching,
     null-field variants) and small multipart helpers (valid jpeg/png/pdf, oversized,
     wrong type, empty).
   - Confirm JUnit 5 + Mockito + Spring Boot test are available on the test classpath.
   - _Requirements: 1, 2_
 
-- [ ] 2. Unit test `ScriptValidationService` field comparison
+- [x] 2. Unit test `ScriptValidationService` field comparison
   - Cover text normalization (case, whitespace collapse, blank=null) for name/drug/
     directions/prescriber fields.
   - Cover digit-only comparison for NPI and phone (formatting ignored).
@@ -23,21 +27,21 @@ the requirements it satisfies.
     values in the description ("blank" for null).
   - _Requirements: 2.2, 2.3, 2.4, 2.5, 2.6_
 
-- [ ] 3. Unit test `ExtractionService` validation branches
+- [x] 3. Unit test `ExtractionService` validation branches
   - Missing/empty → `FILE_MISSING`; > 10 MB → `FILE_TOO_LARGE`; wrong type →
     `UNSUPPORTED_FORMAT`.
   - Happy path delegates to a mocked `PrescriptionExtractionModel` and returns its result.
   - Model exception is wrapped in `ExtractionFailedException`.
   - _Requirements: 1.2, 1.3, 1.4, 1.5_
 
-- [ ] 4. Unit test `Script` and `ScriptQueue` lifecycle
+- [x] 4. Unit test `Script` and `ScriptQueue` lifecycle
   - Legal transitions QUEUED→IN_REVIEW→COMPLETED and QUEUED/IN_REVIEW→REVIEW_FAILED;
     illegal transitions throw `IllegalStateException`.
   - `ScriptQueue.add/pull/pop/find/findByStatus` behavior, including `pull(id)` on a
     non-queued id returning empty.
   - _Requirements: 3.1, 3.2, 3.3, 3.4_
 
-- [ ] 5. Unit test `ScriptReviewService` orchestration
+- [x] 5. Unit test `ScriptReviewService` orchestration
   - Success: marks COMPLETED, re-stamps `scriptId` on the result, removes from queued set.
   - Invalid image: marks REVIEW_FAILED and rethrows `InvalidScriptImageException`.
   - Other failure: marks REVIEW_FAILED and throws `ReviewFailedException`.
@@ -45,17 +49,22 @@ the requirements it satisfies.
     by completedAt desc; `reviewResult(id)` present/absent.
   - _Requirements: 2.1, 2.7, 2.8, 2.9, 3.5, 3.6, 3.7, 3.8_
 
-- [ ] 6. `@WebMvcTest` for `ScriptReviewController`
+- [x] 6. `@WebMvcTest` for `ScriptReviewController`
   - `/autofill` and `/review` multipart binding and 200 responses (services mocked).
   - `/review` with `scriptData` JSON part binds to `ScriptData`.
   - Exception mappings: 422 with image code, 502 `EXTRACTION_FAILED`, 502 `REVIEW_FAILED`.
   - `/{id}/result` 200 vs 404; the three listing endpoints return summaries.
   - _Requirements: 1.1, 2.1, 3.5, 3.6, 3.7, 3.8, 5.1, 5.2, 5.3, 5.4_
 
-- [ ] 7. Unit test `PromptProvider` selection
-  - Add temporary `promptN.txt` fixtures; verify configured-index selection, fallback to
-    lowest when 0/unset, error on missing configured index, error on no prompts.
-  - _Requirements: 4.1, 4.2, 4.3, 4.4_
+- [x] 7. Unit test `PromptProvider` selection
+  - Verifies configured-index selection, fallback to lowest when 0/negative/null, and a
+    clear error on a missing configured index, against the real `prompt1.txt` on the
+    classpath.
+  - Note: the "no prompts found" error path is not unit-tested because `PromptProvider`
+    hardcodes the `classpath:prompts/prompt*.txt` location, so a test cannot remove the
+    real prompt. Covering it would require making the location/resolver injectable — left
+    as optional refactor, not current behavior.
+  - _Requirements: 4.1, 4.2, 4.3, (4.4 partial)_
 
 ## Frontend — build the React client (`autoscript-ui`) over the existing API
 

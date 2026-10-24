@@ -1,18 +1,19 @@
 package com.springray.autoscript;
 
-import com.springray.autoscript.dto.ReviewResult;
-import com.springray.autoscript.dto.ScriptData;
-import com.springray.autoscript.model.Script;
-import com.springray.autoscript.model.ScriptStatus;
-import com.springray.autoscript.services.ScriptQueue;
-import org.junit.jupiter.api.Test;
-
 import java.time.Instant;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Test;
+
+import com.springray.autoscript.dto.ReviewResult;
+import com.springray.autoscript.dto.ScriptData;
+import com.springray.autoscript.model.Script;
+import com.springray.autoscript.model.ScriptStatus;
+import com.springray.autoscript.services.ScriptQueue;
 
 class ScriptQueueTest {
 
@@ -75,5 +76,33 @@ class ScriptQueueTest {
         script.markCompleted(result);
         assertEquals(ScriptStatus.COMPLETED, script.getStatus());
         assertEquals(result, script.getReviewResult());
+    }
+
+    @Test
+    void pullByIdOnNonQueuedReturnsEmpty() {
+        Script script = queue.add(sample());
+        queue.pull(script.getId()); // now IN_REVIEW, no longer in the queued set
+        assertTrue(queue.pull(script.getId()).isEmpty(), "already-pulled id should not pull again");
+        assertTrue(queue.pull("unknown-id").isEmpty(), "unknown id should return empty");
+    }
+
+    @Test
+    void pullOnEmptyQueueReturnsEmpty() {
+        assertTrue(queue.pull().isEmpty());
+    }
+
+    @Test
+    void markCompletedFromQueuedIsIllegal() {
+        Script script = queue.add(sample());
+        ReviewResult result = new ReviewResult(script.getId(), "COMPLETED", Instant.now(), List.of());
+        // never pulled -> still QUEUED -> cannot complete
+        assertThrows(IllegalStateException.class, () -> script.markCompleted(result));
+    }
+
+    @Test
+    void markInReviewTwiceIsIllegal() {
+        Script script = queue.add(sample());
+        script.markInReview();
+        assertThrows(IllegalStateException.class, script::markInReview);
     }
 }
