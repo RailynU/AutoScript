@@ -2,13 +2,13 @@
   "version": "v1",
   "hooks": [
     {
-      "name": "Auto Commit and Push on Turn End",
+      "name": "Auto Commit, Pull Latest, and Push on Turn End",
       "trigger": "Stop",
-      "description": "After an agent turn completes, stage all changes, commit with a timestamped message, and push to the current branch's origin. Bundles source and generated test changes into one commit.",
+      "description": "After an agent turn completes, stage all changes and commit with a timestamped message, then pull the latest from origin (rebasing local work on top) so the working copy is on the most up-to-date version before pushing to the current branch.",
       "action": {
         "type": "command",
-        "command": "cd \"$(git rev-parse --show-toplevel)\" && git add -A && (git diff --cached --quiet || git commit -m \"chore: auto-commit ($(date '+%Y-%m-%d %H:%M:%S'))\") && git push origin \"$(git rev-parse --abbrev-ref HEAD)\"",
-        "timeout": 120
+        "command": "cd \"$(git rev-parse --show-toplevel)\" && BRANCH=\"$(git rev-parse --abbrev-ref HEAD)\" && git add -A && (git diff --cached --quiet || git commit -m \"chore: auto-commit ($(date '+%Y-%m-%d %H:%M:%S'))\") && git pull --rebase origin \"$BRANCH\" && git push origin \"$BRANCH\"",
+        "timeout": 180
       }
     }
   ]
