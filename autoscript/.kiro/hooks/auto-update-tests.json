@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Auto Generate/Update Tests",
+      "trigger": "PostFileSave",
+      "description": "When a Java source file is saved, create or update the matching JUnit 5 test class with coverage for new/changed behavior.",
+      "matcher": "src/main/java/.*\\.java$",
+      "action": {
+        "type": "agent",
+        "prompt": "A Java source file under src/main/java was just created or changed. Locate or create its corresponding JUnit 5 test under src/test/java, mirroring the package path (e.g. com/springray/autoscript/.../FooService.java -> com/springray/autoscript/.../FooServiceTest.java).\n\nRules:\n- Only act on classes that contain testable logic (controllers, services, validation, queue, model logic). Skip the AutoscriptApplication bootstrap class, plain DTOs/records with no behavior, enums, and simple exception classes.\n- If a test class already exists, update it to cover new/changed public methods and keep existing passing tests intact. If it does not exist, create it.\n- Use JUnit 5 (org.junit.jupiter) and Mockito where collaborators need mocking. For Spring web controllers use @WebMvcTest with MockMvc. Match the project's existing test style and imports where present.\n- Cover the happy path plus relevant edge/error cases (validation failures, exceptions thrown by services).\n- Do not weaken assertions just to make tests pass. After writing, run `./mvnw -q test -Dtest=<TheTestClass>` to verify the new/updated test compiles and passes, and fix any failures in the test code.\n- Keep changes scoped to the test file(s); do not modify production source just to make tests pass unless the change revealed a genuine bug, in which case flag it."
+      }
+    }
+  ]
+}

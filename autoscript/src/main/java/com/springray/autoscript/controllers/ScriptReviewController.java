@@ -1,5 +1,20 @@
 package com.springray.autoscript.controllers;
 
+import java.util.List;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestPart;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
+
 import com.springray.autoscript.dto.ErrorResponse;
 import com.springray.autoscript.dto.ReviewResult;
 import com.springray.autoscript.dto.ScriptData;
@@ -9,20 +24,6 @@ import com.springray.autoscript.exception.InvalidScriptImageException;
 import com.springray.autoscript.exception.ReviewFailedException;
 import com.springray.autoscript.services.ExtractionService;
 import com.springray.autoscript.services.ScriptReviewService;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.ExceptionHandler;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestPart;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.multipart.MultipartFile;
-
-import java.util.List;
 
 @RestController
 @RequestMapping("/api/scripts")
@@ -59,6 +60,7 @@ public class ScriptReviewController {
     @GetMapping("/in-review")
     public ResponseEntity<List<ScriptSummary>> inReview() {
         return ResponseEntity.ok(scriptReviewService.inReview());
+        
     }
 
     @GetMapping("/completed")
@@ -75,7 +77,7 @@ public class ScriptReviewController {
 
     @ExceptionHandler(InvalidScriptImageException.class)
     public ResponseEntity<ErrorResponse> handleInvalidImage(InvalidScriptImageException e) {
-        return ResponseEntity.unprocessableEntity()
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_CONTENT)
                 .body(new ErrorResponse(e.getErrorCode(), e.getMessage()));
     }
 
