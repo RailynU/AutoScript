@@ -84,7 +84,7 @@ class ScriptReviewControllerTest {
 
     @Test
     void reviewReturnsResult() throws Exception {
-        ReviewResult result = new ReviewResult("1", "COMPLETED", Instant.now(), List.of());
+        ReviewResult result = ReviewResult.of("1", "COMPLETED", Instant.now(), List.of());
         when(scriptReviewService.review(any(), any())).thenReturn(result);
 
         mockMvc.perform(multipart("/api/scripts/review").file(image()).file(scriptDataPart()))
@@ -141,7 +141,7 @@ class ScriptReviewControllerTest {
 
     @Test
     void reviewResultFoundReturnsResult() throws Exception {
-        ReviewResult r = new ReviewResult("3", "COMPLETED", java.time.Instant.now(), List.of());
+        ReviewResult r = ReviewResult.of("3", "COMPLETED", java.time.Instant.now(), List.of());
         when(scriptReviewService.reviewResult("3")).thenReturn(java.util.Optional.of(r));
 
         mockMvc.perform(get("/api/scripts/3/result"))

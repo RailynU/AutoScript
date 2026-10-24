@@ -72,7 +72,7 @@ class ScriptQueueTest {
     void completedTransitionRecordsResult() {
         Script script = queue.add(sample());
         queue.pull(script.getId());
-        ReviewResult result = new ReviewResult(script.getId(), "COMPLETED", Instant.now(), List.of());
+        ReviewResult result = ReviewResult.of(script.getId(), "COMPLETED", Instant.now(), List.of());
         script.markCompleted(result);
         assertEquals(ScriptStatus.COMPLETED, script.getStatus());
         assertEquals(result, script.getReviewResult());
@@ -94,7 +94,7 @@ class ScriptQueueTest {
     @Test
     void markCompletedFromQueuedIsIllegal() {
         Script script = queue.add(sample());
-        ReviewResult result = new ReviewResult(script.getId(), "COMPLETED", Instant.now(), List.of());
+        ReviewResult result = ReviewResult.of(script.getId(), "COMPLETED", Instant.now(), List.of());
         // never pulled -> still QUEUED -> cannot complete
         assertThrows(IllegalStateException.class, () -> script.markCompleted(result));
     }

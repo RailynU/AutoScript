@@ -8,7 +8,25 @@ import { usePrescriptions } from './hooks/usePrescriptions'
 import { avatarColor, initials } from './ui/avatar'
 import { PrescriptionPreview } from './components/PrescriptionPreview'
 import { scriptsApi } from './api/scripts'
+import type { ScriptData } from './api/scripts'
 import { ApiError } from './api/client'
+
+/**
+ * Convert a patient DOB to the ISO yyyy-MM-dd form the backend ScriptData
+ * (a LocalDate) expects. Accepts "MM/DD/YYYY" or an already-ISO string;
+ * returns null if it can't be parsed.
+ */
+function toIsoDob(dob: string | null | undefined): string | null {
+  if (!dob) return null
+  const s = dob.trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s            // already ISO
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)   // MM/DD/YYYY
+  if (m) {
+    const [, mm, dd, yyyy] = m
+    return `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`
+  }
+  return null
+}
 import type {
   ApiPatient,
   ApiPrescription,
@@ -145,20 +163,66 @@ interface UploadModalProps {
 function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProps) {
   const [step, setStep]               = useState<'file' | 'patient' | 'rx'>(preselectedPatient ? 'rx' : 'file')
   const [patient, setPatient]         = useState<ApiPatient | null>(preselectedPatient ?? null)
-  const [search,  setSearch]          = useState('')
-  const [ptList,  setPtList]          = useState<ApiPatient[]>([])
-  const [ptLoading, setPtLoading]     = useState(false)
   const [file, setFile]               = useState<File | null>(null)
   const fileName = file?.name ?? null
-  const [medication, setMedication]   = useState('')
-  const [dosage,     setDosage]       = useState('')
-  const [instructions, setInstructions] = useState('')
-  const [prescriber, setPrescriber]   = useState('Dr. Jane Doe')
+
+  // Patient lookup form state (replaces the old "load all patients" list).
+  const [lookupFirst, setLookupFirst] = useState('')
+  const [lookupLast,  setLookupLast]  = useState('')
+  const [lookupDob,   setLookupDob]   = useState('')
+  const [lookupPhone, setLookupPhone] = useState('')
+  const [ptResults, setPtResults]     = useState<ApiPatient[] | null>(null) // null = no search run yet
+  const [ptLoading, setPtLoading]     = useState(false)
+
+  // Rx form fields. All six are collected separately in the UI, then composed
+  // into the backend's limited shape on submit (see handleCreate).
+  const [drugName,     setDrugName]     = useState('')
+  const [directions,   setDirections]   = useState('')
+  const [quantity,     setQuantity]     = useState('')
+  const [daySupply,    setDaySupply]    = useState('')
+  const [prescriberName, setPrescriberName] = useState('Dr. Jane Doe')
+  const [npiDea,       setNpiDea]       = useState('')
   const [saving,  setSaving]          = useState(false)
   const [error,   setError]           = useState<string | null>(null)
   const [autofilling, setAutofilling] = useState(false)
   const [autofillNote, setAutofillNote] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  // Create-new-patient fallback (shown when a lookup returns no matches).
+  const [showCreatePt, setShowCreatePt] = useState(false)
+  const [creatingPt, setCreatingPt]     = useState(false)
+  const [newPt, setNewPt] = useState({ firstName: '', lastName: '', dob: '', phone: '', email: '' })
+
+  function pickFile(f: File | undefined | null) {
+    // Only accept a new file when none is currently loaded — the user must
+    // remove the current image before uploading another.
+    if (f && !file) setFile(f)
+  }
+
+  async function handleCreatePatient() {
+    if (!newPt.firstName.trim() || !newPt.lastName.trim() || !newPt.dob.trim()) return
+    setCreatingPt(true)
+    setError(null)
+    try {
+      const created = await apiFetch<ApiPatient>('/patients', {
+        method: 'POST',
+        body: JSON.stringify({
+          firstName: newPt.firstName.trim(),
+          lastName:  newPt.lastName.trim(),
+          dob:       newPt.dob.trim(),
+          phone:     newPt.phone.trim() || null,
+          email:     newPt.email.trim() || null,
+        }),
+      })
+      setPatient(created)          // auto-select the new patient
+      setShowCreatePt(false)
+      setPtResults([created])      // reflect it in the results list
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not create patient')
+    } finally {
+      setCreatingPt(false)
+    }
+  }
 
   async function handleAutofill() {
     if (!file) return
@@ -167,19 +231,14 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
     setError(null)
     try {
       const data = await scriptsApi.autofill(file)
-      // Map extracted fields onto the form fields that exist. Only overwrite
-      // a field when the AI returned a value for it.
-      const med = [data.drugName].filter(Boolean).join(' ').trim()
-      if (med)                setMedication(med)
-      if (data.directions)    setInstructions(data.directions)
-      if (data.prescriberName) setPrescriber(data.prescriberName)
-      // dosage isn't a distinct extracted field; derive a hint if present
-      if (data.quantity != null || data.daySupply != null) {
-        const parts: string[] = []
-        if (data.quantity != null)  parts.push(`Qty ${data.quantity}`)
-        if (data.daySupply != null) parts.push(`${data.daySupply}-day supply`)
-        setDosage(parts.join(' · '))
-      }
+      // Map extracted fields onto the six rx form fields. Only overwrite a
+      // field when the AI actually returned a value for it.
+      if (data.drugName)       setDrugName(data.drugName)
+      if (data.directions)     setDirections(data.directions)
+      if (data.quantity != null)  setQuantity(String(data.quantity))
+      if (data.daySupply != null) setDaySupply(String(data.daySupply))
+      if (data.prescriberName) setPrescriberName(data.prescriberName)
+      if (data.prescriberNpi)  setNpiDea(data.prescriberNpi)
       setAutofillNote('✨ Fields autofilled from the image. Please verify against the prescription before starting review.')
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) {
@@ -192,39 +251,100 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
     }
   }
 
-  // Load patients for search
-  useEffect(() => {
-    if (step !== 'patient') return
+  // Run a patient lookup against GET /api/patients with the entered params
+  // (partial match). Only the matching results are shown — we never load all
+  // patients up front.
+  async function handlePatientSearch() {
     setPtLoading(true)
-    apiFetch<ApiPatient[]>(`/patients`)
-      .then(setPtList)
-      .catch(e => setError(e.message))
-      .finally(() => setPtLoading(false))
-  }, [step])
+    setError(null)
+    setShowCreatePt(false)
+    try {
+      const params = new URLSearchParams()
+      if (lookupFirst.trim()) params.set('firstName', lookupFirst.trim())
+      if (lookupLast.trim())  params.set('lastName',  lookupLast.trim())
+      if (lookupDob.trim())   params.set('dob',       lookupDob.trim())
+      if (lookupPhone.trim()) params.set('phone',     lookupPhone.trim())
+      const results = await apiFetch<ApiPatient[]>(`/patients?${params.toString()}`)
+      setPtResults(results)
+      // Pre-fill the create-patient form with whatever was typed, so if there
+      // are no matches the user can create a profile without retyping.
+      setNewPt(p => ({
+        ...p,
+        firstName: lookupFirst.trim() || p.firstName,
+        lastName:  lookupLast.trim()  || p.lastName,
+        dob:       lookupDob.trim()   || p.dob,
+        phone:     lookupPhone.trim() || p.phone,
+      }))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Patient search failed')
+      setPtResults([])
+    } finally {
+      setPtLoading(false)
+    }
+  }
 
-  const filteredPts = ptList.filter(p => {
-    const q = search.toLowerCase()
-    return !q
-      || `${p.firstName} ${p.lastName}`.toLowerCase().includes(q)
-      || (p.phone ?? '').includes(q)
-      || p.dob.includes(q)
-  })
+  // Are all six required rx fields filled? (quantity / daySupply must be numeric)
+  const rxValid =
+    drugName.trim() !== '' &&
+    directions.trim() !== '' &&
+    quantity.trim() !== '' && !Number.isNaN(Number(quantity)) &&
+    daySupply.trim() !== '' && !Number.isNaN(Number(daySupply)) &&
+    prescriberName.trim() !== '' &&
+    npiDea.trim() !== ''
 
   async function handleCreate() {
-    if (!patient || !medication.trim()) return
+    if (!patient || !rxValid) return
     setSaving(true)
     setError(null)
     try {
+      // 1) Persist the prescription record. The backend prescription entity has
+      //    { patientId, medication, dosage, instructions, prescriber }, so the
+      //    six UI fields are composed into that shape:
+      //      medication   = Drug Name
+      //      instructions = Directions
+      //      dosage       = "Qty {quantity} · {daySupply}-day supply"
+      //      prescriber   = "{prescriberName} (NPI/DEA: {npiDea})"
       await apiFetch('/prescriptions', {
         method: 'POST',
         body: JSON.stringify({
           patientId:    patient.id,
-          medication:   medication.trim(),
-          dosage:       dosage.trim() || null,
-          instructions: instructions.trim() || null,
-          prescriber:   prescriber.trim() || null,
+          medication:   drugName.trim(),
+          dosage:       `Qty ${quantity.trim()} · ${daySupply.trim()}-day supply`,
+          instructions: directions.trim(),
+          prescriber:   `${prescriberName.trim()} (NPI/DEA: ${npiDea.trim()})`,
         }),
       })
+
+      // 2) If we have the image, send it + the verified fields to the AI review
+      //    endpoint so the backend can cross-check for dispensing errors.
+      //    This is best-effort: if AI is disabled (404) or unreachable, the
+      //    prescription is still created — we just skip the automated flags.
+      if (file) {
+        try {
+          const scriptData: ScriptData = {
+            patientFirstName:   patient.firstName,
+            patientLastName:    patient.lastName,
+            patientDateOfBirth: toIsoDob(patient.dob),
+            drugName:           drugName.trim(),
+            directions:         directions.trim(),
+            quantity:           Number(quantity),
+            daySupply:          Number(daySupply),
+            refillCount:        null,
+            prescriberName:     prescriberName.trim(),
+            prescriberNpi:      npiDea.trim(),
+            prescriberPhone:    null,
+          }
+          await scriptsApi.review(file, scriptData)
+        } catch (reviewErr) {
+          // Non-fatal — the record is saved; the AI review is optional.
+          if (reviewErr instanceof ApiError && reviewErr.status === 404) {
+            // AI not enabled on the server; nothing to do.
+          } else {
+            console.warn('AI review skipped:', reviewErr)
+          }
+        }
+      }
+
       onCreated()
       onClose()
     } catch (e: unknown) {
@@ -235,8 +355,8 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
 
   return (
     <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="modal-title">
-      <div className={`modal${step === 'rx' ? ' modal--wide' : ''}`} onClick={e => e.stopPropagation()}
-        style={{ maxWidth: step === 'rx' ? 960 : 560 }}>
+      <div className={`modal${step === 'rx' || step === 'patient' ? ' modal--wide' : ''}`} onClick={e => e.stopPropagation()}
+        style={{ maxWidth: step === 'rx' || step === 'patient' ? 960 : 560 }}>
 
         {/* Header */}
         <div className="modal-header">
@@ -270,76 +390,185 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
           {step === 'file' && (
             <>
               <input ref={fileRef} type="file" accept=".jpg,.jpeg,.png,.pdf" style={{ display:'none' }}
-                onChange={e => {
-                  const f = e.target.files?.[0]
-                  if (f) { setFile(f); setStep('patient') }
-                }} />
-              <div className="drop-zone" role="button" tabIndex={0}
-                onClick={() => fileRef.current?.click()}
-                onKeyDown={e => e.key === 'Enter' && fileRef.current?.click()}
-                onDrop={e => {
-                  e.preventDefault()
-                  const f = e.dataTransfer.files?.[0]
-                  if (f) { setFile(f); setStep('patient') }
-                }}
-                onDragOver={e => e.preventDefault()}
-              >
-                <div className="drop-icon">☁️</div>
-                <p>Drag and drop a prescription image or PDF here<br />
-                  <span className="browse">or click to browse</span></p>
-                <p className="formats">Supports JPG, PNG, PDF (max 10MB)</p>
-              </div>
+                onChange={e => { pickFile(e.target.files?.[0]); e.target.value = '' }} />
+
+              {!file ? (
+                // No file yet — show the drop zone.
+                <div className="drop-zone" role="button" tabIndex={0}
+                  onClick={() => fileRef.current?.click()}
+                  onKeyDown={e => e.key === 'Enter' && fileRef.current?.click()}
+                  onDrop={e => { e.preventDefault(); pickFile(e.dataTransfer.files?.[0]) }}
+                  onDragOver={e => e.preventDefault()}
+                >
+                  <div className="drop-icon">☁️</div>
+                  <p>Drag and drop a prescription image or PDF here<br />
+                    <span className="browse">or click to browse</span></p>
+                  <p className="formats">Supports JPG, PNG, PDF (max 10MB)</p>
+                </div>
+              ) : (
+                // A file is loaded — lock the uploader. To change it the user
+                // must first remove the current image.
+                <div className="uploaded-file-card">
+                  <div className="uploaded-file-info">
+                    <span className="uploaded-file-icon">📄</span>
+                    <div>
+                      <div className="uploaded-file-name">{fileName}</div>
+                      <div className="uploaded-file-size">{(file.size / 1024).toFixed(0)} KB</div>
+                    </div>
+                  </div>
+                  <button className="btn-remove-file" onClick={() => setFile(null)} aria-label="Remove uploaded image">
+                    <XIcon /> Remove
+                  </button>
+                </div>
+              )}
+
               <div className="modal-footer" style={{ marginTop: 16 }}>
                 <button className="btn-cancel" onClick={onClose}>Cancel</button>
-                <button className="btn-primary" onClick={() => setStep('patient')}>
-                  Skip — enter manually <ChevronRight />
+                <button className="btn-primary" disabled={!file} onClick={() => setStep('patient')}>
+                  Proceed <ChevronRight />
                 </button>
               </div>
             </>
           )}
 
-          {/* Step 2 — Patient */}
+          {/* Step 2 — Patient lookup: image preview (left) + lookup/create (right) */}
           {step === 'patient' && (
-            <>
-              {fileName && <div className="file-badge">📄 {fileName}</div>}
-              <div className="patient-search" style={{ marginBottom: 12 }}>
-                <SearchIcon />
-                <input type="text" placeholder="Search by name, phone, or DOB…"
-                  value={search} onChange={e => setSearch(e.target.value)}
-                  aria-label="Search patients" autoFocus />
+            <div className="details-layout">
+              {/* LEFT — the uploaded script, visible while looking up the patient */}
+              <div className="details-preview">
+                <PrescriptionPreview file={file} onReupload={() => setStep('file')} />
               </div>
-              {ptLoading
-                ? <div className="loading-row"><Spinner small /> Loading patients…</div>
-                : (
-                  <div className="patient-list" role="listbox" style={{ maxHeight: 280, overflowY:'auto' }}>
-                    {filteredPts.map(p => (
-                      <div key={p.id} role="option"
-                        className={`patient-row${patient?.id === p.id ? ' selected' : ''}`}
-                        aria-selected={patient?.id === p.id}
-                        onClick={() => setPatient(p)}
-                        tabIndex={0} onKeyDown={e => e.key === 'Enter' && setPatient(p)}
-                      >
-                        <Avatar id={p.id} fn={p.firstName} ln={p.lastName} />
-                        <div className="patient-details">
-                          <div className="pname">{p.fullName}</div>
-                          <div className="pmeta">DOB {p.dob} • {p.phone ?? '—'}</div>
-                        </div>
-                        {patient?.id === p.id && <span style={{ color:'#2563eb', marginLeft:'auto' }}><CheckIcon /></span>}
+
+              {/* RIGHT — lookup form + results, or the create-patient fallback */}
+              <div className="details-form">
+                {!showCreatePt ? (
+                  <>
+                    {/* Lookup form — search GET /api/patients by partial match */}
+                    <form className="create-form-grid" style={{ marginBottom: 12 }}
+                      onSubmit={e => { e.preventDefault(); handlePatientSearch() }}>
+                      <div className="field-group">
+                        <label className="field-label">First Name</label>
+                        <input className="field-input" type="text" placeholder="e.g. Jane"
+                          value={lookupFirst} onChange={e => setLookupFirst(e.target.value)} autoFocus />
                       </div>
-                    ))}
-                    {filteredPts.length === 0 && !ptLoading && (
-                      <p style={{ padding:'16px', color:'#94a3b8', textAlign:'center', fontSize:13 }}>No patients found</p>
+                      <div className="field-group">
+                        <label className="field-label">Last Name</label>
+                        <input className="field-input" type="text" placeholder="e.g. Doe"
+                          value={lookupLast} onChange={e => setLookupLast(e.target.value)} />
+                      </div>
+                      <div className="field-group">
+                        <label className="field-label">DOB</label>
+                        <input className="field-input" type="text" placeholder="MM/DD/YYYY"
+                          value={lookupDob} onChange={e => setLookupDob(e.target.value)} />
+                      </div>
+                      <div className="field-group">
+                        <label className="field-label">Phone</label>
+                        <input className="field-input" type="text" placeholder="e.g. 555-0100"
+                          value={lookupPhone} onChange={e => setLookupPhone(e.target.value)} />
+                      </div>
+                      <div className="field-group" style={{ gridColumn:'1 / -1' }}>
+                        <button type="submit" className="btn-primary" disabled={ptLoading}
+                          style={{ justifySelf:'start' }}>
+                          {ptLoading ? <><Spinner small /> Searching…</> : <><SearchIcon /> Search</>}
+                        </button>
+                      </div>
+                    </form>
+
+                    {/* Results — only matching patients */}
+                    {ptResults !== null && !ptLoading && (
+                      <>
+                        <div className="patient-list" role="listbox" style={{ maxHeight: 220, overflowY:'auto' }}>
+                          {ptResults.map(p => (
+                            <div key={p.id} role="option"
+                              className={`patient-row${patient?.id === p.id ? ' selected' : ''}`}
+                              aria-selected={patient?.id === p.id}
+                              onClick={() => setPatient(p)}
+                              tabIndex={0} onKeyDown={e => e.key === 'Enter' && setPatient(p)}
+                            >
+                              <Avatar id={p.id} fn={p.firstName} ln={p.lastName} />
+                              <div className="patient-details">
+                                <div className="pname">{p.fullName}</div>
+                                <div className="pmeta">DOB {p.dob} • {p.phone ?? '—'}</div>
+                              </div>
+                              {patient?.id === p.id && <span style={{ color:'#2563eb', marginLeft:'auto' }}><CheckIcon /></span>}
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* No matches → offer to create a new patient profile */}
+                        {ptResults.length === 0 && (
+                          <div className="no-match-create">
+                            <p className="no-match-text">No matching patient found.</p>
+                            <button className="btn-primary" onClick={() => setShowCreatePt(true)}>
+                              ＋ Create new patient
+                            </button>
+                          </div>
+                        )}
+                      </>
                     )}
+                  </>
+                ) : (
+                  /* Create-new-patient form (prefilled from the lookup fields) */
+                  <div className="create-pt-panel">
+                    <div className="entry-mode-row" style={{ marginTop: 0 }}>
+                      <span className="entry-mode-label">New patient profile</span>
+                      <button className="chip-change" onClick={() => setShowCreatePt(false)}>Back to search</button>
+                    </div>
+                    <div className="create-form-grid" style={{ marginTop: 12 }}>
+                      <div className="field-group">
+                        <label className="field-label">First Name <span className="req">*</span></label>
+                        <input className="field-input" type="text" value={newPt.firstName}
+                          onChange={e => setNewPt(p => ({ ...p, firstName: e.target.value }))} />
+                      </div>
+                      <div className="field-group">
+                        <label className="field-label">Last Name <span className="req">*</span></label>
+                        <input className="field-input" type="text" value={newPt.lastName}
+                          onChange={e => setNewPt(p => ({ ...p, lastName: e.target.value }))} />
+                      </div>
+                      <div className="field-group">
+                        <label className="field-label">DOB <span className="req">*</span></label>
+                        <input className="field-input" type="text" placeholder="MM/DD/YYYY" value={newPt.dob}
+                          onChange={e => setNewPt(p => ({ ...p, dob: e.target.value }))} />
+                      </div>
+                      <div className="field-group">
+                        <label className="field-label">Phone</label>
+                        <input className="field-input" type="text" value={newPt.phone}
+                          onChange={e => setNewPt(p => ({ ...p, phone: e.target.value }))} />
+                      </div>
+                      <div className="field-group" style={{ gridColumn:'1 / -1' }}>
+                        <label className="field-label">Email</label>
+                        <input className="field-input" type="email" value={newPt.email}
+                          onChange={e => setNewPt(p => ({ ...p, email: e.target.value }))} />
+                      </div>
+                    </div>
+                    <button className="btn-primary" style={{ marginTop: 12 }}
+                      disabled={creatingPt || !newPt.firstName.trim() || !newPt.lastName.trim() || !newPt.dob.trim()}
+                      onClick={handleCreatePatient}>
+                      {creatingPt ? <><Spinner small /> Creating…</> : <>＋ Create & select patient</>}
+                    </button>
                   </div>
-                )
-              }
-              <div className="modal-footer" style={{ marginTop: 12 }}>
-                <button className="btn-cancel" onClick={() => setStep('file')}>Back</button>
-                <button className="btn-primary" disabled={!patient} onClick={() => setStep('rx')}>
-                  Continue <ChevronRight />
-                </button>
+                )}
+
+                {/* Selected patient confirmation */}
+                {patient && !showCreatePt && (
+                  <div className="selected-patient-chip" style={{ marginTop: 12 }}>
+                    <Avatar id={patient.id} fn={patient.firstName} ln={patient.lastName} size={32} />
+                    <div>
+                      <div style={{ fontWeight:600, fontSize:13 }}>{patient.fullName}</div>
+                      <div style={{ fontSize:11, color:'#64748b' }}>DOB {patient.dob}</div>
+                    </div>
+                    <span style={{ color:'#2563eb', marginLeft:'auto' }}><CheckIcon /></span>
+                  </div>
+                )}
+
+                <div className="modal-footer" style={{ marginTop: 16 }}>
+                  <button className="btn-cancel" onClick={() => setStep('file')}>Back</button>
+                  <button className="btn-primary" disabled={!patient} onClick={() => setStep('rx')}>
+                    Continue <ChevronRight />
+                  </button>
+                </div>
               </div>
-            </>
+            </div>
           )}
 
           {/* Step 3 — Details: image preview (left) + form (right) */}
@@ -377,32 +606,44 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
 
                 <div className="create-form-grid" style={{ marginTop: 12 }}>
                   <div className="field-group" style={{ gridColumn:'1 / -1' }}>
-                    <label className="field-label">Medication <span className="req">*</span></label>
+                    <label className="field-label">Drug Name <span className="req">*</span></label>
                     <input className="field-input" type="text" placeholder="e.g. Lisinopril 10mg"
-                      value={medication} onChange={e => setMedication(e.target.value)} />
-                  </div>
-                  <div className="field-group">
-                    <label className="field-label">Dosage</label>
-                    <input className="field-input" type="text" placeholder="e.g. 1 tablet daily"
-                      value={dosage} onChange={e => setDosage(e.target.value)} />
-                  </div>
-                  <div className="field-group">
-                    <label className="field-label">Prescriber</label>
-                    <input className="field-input" type="text"
-                      value={prescriber} onChange={e => setPrescriber(e.target.value)} />
+                      value={drugName} onChange={e => setDrugName(e.target.value)} />
                   </div>
                   <div className="field-group" style={{ gridColumn:'1 / -1' }}>
-                    <label className="field-label">Instructions</label>
+                    <label className="field-label">Directions <span className="req">*</span></label>
                     <textarea className="field-input field-textarea" rows={2}
-                      placeholder="e.g. Take with food, avoid grapefruit…"
-                      value={instructions} onChange={e => setInstructions(e.target.value)} />
+                      placeholder="e.g. Take 1 tablet by mouth once daily"
+                      value={directions} onChange={e => setDirections(e.target.value)} />
+                  </div>
+                  <div className="field-group">
+                    <label className="field-label">Quantity <span className="req">*</span></label>
+                    <input className="field-input" type="number" min="0" inputMode="numeric"
+                      placeholder="e.g. 30"
+                      value={quantity} onChange={e => setQuantity(e.target.value)} />
+                  </div>
+                  <div className="field-group">
+                    <label className="field-label">Day Supply <span className="req">*</span></label>
+                    <input className="field-input" type="number" min="0" inputMode="numeric"
+                      placeholder="e.g. 30"
+                      value={daySupply} onChange={e => setDaySupply(e.target.value)} />
+                  </div>
+                  <div className="field-group">
+                    <label className="field-label">Prescriber Name <span className="req">*</span></label>
+                    <input className="field-input" type="text" placeholder="e.g. Dr. Jane Doe"
+                      value={prescriberName} onChange={e => setPrescriberName(e.target.value)} />
+                  </div>
+                  <div className="field-group">
+                    <label className="field-label">Prescriber NPI/DEA <span className="req">*</span></label>
+                    <input className="field-input" type="text" placeholder="e.g. 1234567890"
+                      value={npiDea} onChange={e => setNpiDea(e.target.value)} />
                   </div>
                 </div>
 
                 <div className="modal-footer" style={{ marginTop: 16 }}>
                   <button className="btn-cancel" onClick={() => setStep('patient')} disabled={saving}>Back</button>
                   <button className="btn-primary"
-                    disabled={!medication.trim() || saving || !patient}
+                    disabled={!rxValid || saving || !patient}
                     onClick={handleCreate}>
                     {saving ? <><Spinner small /> Saving…</> : <>Start Review <ChevronRight /></>}
                   </button>

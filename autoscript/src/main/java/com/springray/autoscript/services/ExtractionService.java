@@ -15,6 +15,8 @@ import java.util.Set;
 @ConditionalOnProperty(name = "autoscript.ai.enabled", havingValue = "true")
 public class ExtractionService {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ExtractionService.class);
+
     private static final long MAX_FILE_SIZE_BYTES = 10L * 1024 * 1024;
     private static final Set<String> ACCEPTED_CONTENT_TYPES = Set.of(
             "image/jpeg", "image/png", "application/pdf");
@@ -30,8 +32,28 @@ public class ExtractionService {
         try {
             return extractionModel.extractPrescription(image);
         } catch (Exception e) {
+            // Log the real cause so failures are diagnosable, with secrets redacted.
+            log.warn("Prescription extraction failed: {}", redactSecrets(rootCauseChain(e)));
             throw new ExtractionFailedException("Prescription extraction could not be completed.", e);
         }
+    }
+
+    /** Concise "Type: message <- Type: message" chain of causes. */
+    private static String rootCauseChain(Throwable t) {
+        StringBuilder sb = new StringBuilder();
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (sb.length() > 0) sb.append(" <- ");
+            sb.append(c.getClass().getSimpleName()).append(": ").append(c.getMessage());
+            if (c.getCause() == c) break;
+        }
+        return sb.toString();
+    }
+
+    /** Strip API keys / bearer tokens from text before it reaches logs. */
+    static String redactSecrets(String s) {
+        if (s == null) return null;
+        return s.replaceAll("sk-[A-Za-z0-9_\\-]{8,}", "sk-***REDACTED***")
+                .replaceAll("(?i)(bearer\\s+)[A-Za-z0-9._\\-]+", "$1***REDACTED***");
     }
 
     private void validate(MultipartFile image) {

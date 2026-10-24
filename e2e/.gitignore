@@ -1,0 +1,5 @@
+# Run artifacts — may contain provider error messages; never commit.
+*.log
+*.txt
+match.json
+mismatch.json

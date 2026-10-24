@@ -32,7 +32,7 @@ public class ScriptValidationService {
         checkPrescriberNpi(extracted, manualEntry).ifPresent(flags::add);
         checkPrescriberPhone(extracted, manualEntry).ifPresent(flags::add);
 
-        return new ReviewResult(null, STATUS_COMPLETED, Instant.now(), List.copyOf(flags));
+        return ReviewResult.of(null, STATUS_COMPLETED, Instant.now(), flags);
     }
 
     private Optional<Flag> checkPatientFirstName(ScriptData extracted, ScriptData manualEntry) {
@@ -120,7 +120,8 @@ public class ScriptValidationService {
     private Flag mismatch(String field, String label, String extracted, String manual) {
         String description = "The entered %s (%s) does not match the %s on the script (%s)."
                 .formatted(label, displayValue(manual), label, displayValue(extracted));
-        return new Flag(field, description);
+        // Deterministic field comparison → severity decided by the rule, not the model.
+        return Flag.rule(field, description);
     }
 
     private String normalizeText(String value) {

@@ -41,7 +41,7 @@ class ScriptReviewServiceTest {
         when(extractionService.extract(any())).thenReturn(ScriptTestFixtures.fullScript());
         // validation returns a result with a null scriptId, as the real service does
         when(validationService.review(any(), any()))
-                .thenReturn(new ReviewResult(null, "COMPLETED", Instant.now(), List.of()));
+                .thenReturn(ReviewResult.of(null, "COMPLETED", Instant.now(), List.of()));
 
         ReviewResult result = service.review(image, manual);
 
@@ -95,7 +95,7 @@ class ScriptReviewServiceTest {
     void completedListingOrderedByCompletionDescending() {
         when(extractionService.extract(any())).thenReturn(ScriptTestFixtures.fullScript());
         when(validationService.review(any(), any()))
-                .thenReturn(new ReviewResult(null, "COMPLETED", Instant.now(), List.of()));
+                .thenReturn(ReviewResult.of(null, "COMPLETED", Instant.now(), List.of()));
 
         service.review(image, ScriptTestFixtures.fullScript()); // id 1
         service.review(image, ScriptTestFixtures.fullScript()); // id 2

@@ -39,7 +39,8 @@ public class ScriptReviewService {
         try {
             ScriptData extracted = extractionService.extract(image);
             ReviewResult result = scriptValidationService.review(extracted, manualEntry);
-            ReviewResult persisted = new ReviewResult(
+            // Re-stamp with the real script id; summary is derived from the flags.
+            ReviewResult persisted = ReviewResult.of(
                     pulled.getId(), result.status(), result.reviewedAt(), result.flags());
             pulled.markCompleted(persisted);
             return persisted;
