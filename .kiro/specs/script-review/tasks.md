@@ -1,110 +1,145 @@
 # Implementation Plan — AutoScript Prescription Review
 
-This plan reflects a codebase where the backend REST API is already implemented and the
-`autoscript-ui` React project is scaffolded but its UI is not yet built. Backend tasks are
-framed as "document and harden with tests" to lock in current behavior; frontend tasks
-build the missing client. Each task references the requirements it satisfies.
+This plan tracks the Node.js implementation: the `autoscript/` pnpm workspace (API, RX Engine,
+shared contracts, clinical rules) and the `autoscript-ui` client. Each task references the
+requirements it satisfies.
 
-Backend status: all backend tasks (1–7) are complete. The suite has 48 passing tests
-(`./mvnw test`); run with `-Dspring.ai.openai.api-key=<any-value>` so the OpenAI
-auto-configuration has a key at context load.
+Status: tasks 1–20 are complete. Test suites: `@autoscript/clinical-rules` 37 tests,
+`@autoscript/rx-engine` 78 tests, `@autoscript/api` 25 tests (needs the `autoscript_test`
+database on :5433). Run everything with `pnpm test` from `autoscript/`.
 
-## Backend — lock in current behavior with tests
+## Workspace and infrastructure
 
-- [x] 1. Add test scaffolding and shared fixtures
-  - Create a test support class with builders for `ScriptData` (matching, mismatching,
-    null-field variants) and small multipart helpers (valid jpeg/png/pdf, oversized,
-    wrong type, empty).
-  - Confirm JUnit 5 + Mockito + Spring Boot test are available on the test classpath.
-  - _Requirements: 1, 2_
+- [x] 1. Set up the pnpm workspace
+  - `apps/api`, `apps/rx-engine`, `packages/shared`, `packages/clinical-rules`, shared
+    `tsconfig.base.json`, root scripts (`dev`, `test`, `typecheck`, `setup`, `db:*`, `rag:*`).
+  - `docker-compose.yml` with `pgvector/pgvector:pg16` on :5433; `docker/initdb` enables the
+    `vector` extension and creates `autoscript_test`.
+  - `.env.example` documents database, ports, LLM, embedding and timeout settings.
+  - _Requirements: 5.1, 8.4_
 
-- [x] 2. Unit test `ScriptValidationService` field comparison
-  - Cover text normalization (case, whitespace collapse, blank=null) for name/drug/
-    directions/prescriber fields.
-  - Cover digit-only comparison for NPI and phone (formatting ignored).
-  - Cover value equality for DOB, quantity, day supply, refill count.
-  - Assert a clean result has zero flags and each mismatch yields one `Flag` with both
-    values in the description ("blank" for null).
-  - _Requirements: 2.2, 2.3, 2.4, 2.5, 2.6_
+- [x] 2. Define shared contracts in `packages/shared`
+  - zod schemas for statuses and stages, patients, `EnteredScriptData`,
+    `ExtractedPrescription`, findings and evidence, `AnalyzeRequest`, `EngineCallback`,
+    `AnalysisReport`, review kinds and transition tables, demo scenarios.
+  - _Requirements: 1.4, 3, 6.3, 9.1_
 
-- [x] 3. Unit test `ExtractionService` validation branches
-  - Missing/empty → `FILE_MISSING`; > 10 MB → `FILE_TOO_LARGE`; wrong type →
-    `UNSUPPORTED_FORMAT`.
-  - Happy path delegates to a mocked `PrescriptionExtractionModel` and returns its result.
-  - Model exception is wrapped in `ExtractionFailedException`.
-  - _Requirements: 1.2, 1.3, 1.4, 1.5_
+- [x] 3. Prisma schema, migrations and seed
+  - Patient, Allergy, Condition, PatientMedication, Prescription, Review; review status
+    migration; `enteredData` column.
+  - Seed demo patients with allergies, conditions and medications (`pnpm db:seed`).
+  - _Requirements: 9, 10_
 
-- [x] 4. Unit test `Script` and `ScriptQueue` lifecycle
-  - Legal transitions QUEUED→IN_REVIEW→COMPLETED and QUEUED/IN_REVIEW→REVIEW_FAILED;
-    illegal transitions throw `IllegalStateException`.
-  - `ScriptQueue.add/pull/pop/find/findByStatus` behavior, including `pull(id)` on a
-    non-queued id returning empty.
-  - _Requirements: 3.1, 3.2, 3.3, 3.4_
+## RX Engine
 
-- [x] 5. Unit test `ScriptReviewService` orchestration
-  - Success: marks COMPLETED, re-stamps `scriptId` on the result, removes from queued set.
-  - Invalid image: marks REVIEW_FAILED and rethrows `InvalidScriptImageException`.
-  - Other failure: marks REVIEW_FAILED and throws `ReviewFailedException`.
-  - Listing order: queued by submittedAt asc, in-review by reviewStartedAt asc, completed
-    by completedAt desc; `reviewResult(id)` present/absent.
-  - _Requirements: 2.1, 2.7, 2.8, 2.9, 3.5, 3.6, 3.7, 3.8_
+- [x] 4. Extraction
+  - Vision model for JPG/PNG, PDF text layer (explicit failure without one), pasted text.
+  - Local drug-name normalization; per-line confidence and `uncertainties`.
+  - `POST /extract` for autofill.
+  - _Requirements: 2.1, 2.4_
 
-- [x] 6. `@WebMvcTest` for `ScriptReviewController`
-  - `/autofill` and `/review` multipart binding and 200 responses (services mocked).
-  - `/review` with `scriptData` JSON part binds to `ScriptData`.
-  - Exception mappings: 422 with image code, 502 `EXTRACTION_FAILED`, 502 `REVIEW_FAILED`.
-  - `/{id}/result` 200 vs 404; the three listing endpoints return summaries.
-  - _Requirements: 1.1, 2.1, 3.5, 3.6, 3.7, 3.8, 5.1, 5.2, 5.3, 5.4_
+- [x] 5. Deterministic clinical rules
+  - Interactions, allergy and cross-reactivity, daily dose maximum, condition
+    contraindications, duplicate therapy, missing prescription fields, unresolved drugs,
+    extraction confidence, patient context rules; therapy context classification.
+  - `RULES_VERSION = "autoscript-rules-2026.10"`.
+  - _Requirements: 4.1–4.10_
 
-- [x] 7. Unit test `PromptProvider` selection
-  - Verifies configured-index selection, fallback to lowest when 0/negative/null, and a
-    clear error on a missing configured index, against the real `prompt1.txt` on the
-    classpath.
-  - Note: the "no prompts found" error path is not unit-tested because `PromptProvider`
-    hardcodes the `classpath:prompts/prompt*.txt` location, so a test cannot remove the
-    real prompt. Covering it would require making the location/resolver injectable — left
-    as optional refactor, not current behavior.
-  - _Requirements: 4.1, 4.2, 4.3, (4.4 partial)_
+- [x] 6. Manual entry verification rule (`entry.verify`)
+  - Field-by-field comparison of `enteredData` with the extraction, `DATA_ENTRY_MISMATCH`
+    findings with per-field severities; no-op when entry is skipped.
+  - _Requirements: 3.1–3.7_
 
-## Frontend — build the React client (`autoscript-ui`) over the existing API
+- [x] 7. Reference collection and RAG
+  - Curated references with frontmatter under `references/`, section-aware chunking,
+    `pnpm rag:ingest`.
+  - `Retriever.search`: pgvector cosine → strict/loose full-text → `NONE`; method and
+    searched-document count in the report coverage.
+  - Rule-attached evidence (`RULE`) and per-finding evidence pool with dedupe.
+  - _Requirements: 5.1–5.5_
 
-The Vite + React 19 + TypeScript project is scaffolded and its dev server proxies `/api/*`
-to the backend on `:8080`. `App.tsx` is still the default starter; the tasks below build
-the actual UI.
+- [x] 8. Labelled example cases
+  - `pnpm rag:ingest:examples`; up to three similar cases shown to the model for calibration,
+    never citable.
+  - _Requirements: 5.6_
 
-- [ ] 8. Replace the starter app and add an API client
-  - Remove the default Vite template content from `App.tsx`/`App.css` and set up routing
-    for the Upload & Review view and the `/dashboard` view.
-  - Add a typed API module wrapping the six endpoints and normalizing `ErrorResponse`
-    (fields matching the backend DTOs: `ScriptData`, `ReviewResult`, `Flag`,
-    `ScriptSummary`).
-  - _Requirements: 6_
+- [x] 9. Evidence-grounded AI pass
+  - Grounded prompt, citation validation (`rejectedCitations`), `aiContext` on rule findings,
+    unsupported observations clamped to LOW / UNVERIFIED with `proposedSeverity` kept.
+  - AI failure → `SYSTEM_LIMITATION` finding, deterministic findings kept.
+  - _Requirements: 6.1–6.5_
 
-- [ ] 9. Upload + autofill flow
-  - File picker with client-side guard for type ∈ {jpeg, png, pdf} and ≤ 10 MB.
-  - On select, call `/autofill` and bind returned `ScriptData` to an editable form;
-    render null fields as empty inputs (never the literal "null").
-  - Disable the Autofill control and show a loading indicator while the request is in
-    flight; apply the field guards from Requirement 6.8.
-  - _Requirements: 6.1, 6.5, 6.6, 6.7, 6.8_
+- [x] 10. Disposition policy and pipeline
+  - `decideDisposition`: `MANUAL_REVIEW_NEEDED` / `NO_FLAGS_DETECTED`, never "safe".
+  - `runPipeline` with ordered progress stages, `ANALYSIS_TIMEOUT_MS` deadline and a single
+    terminal callback.
+  - _Requirements: 7.1–7.5, 8.1, 8.3, 8.4_
 
-- [ ] 10. Review submission + flag display
-  - Build multipart with the original image and the edited `scriptData` JSON part (JSON
-    content type), POST `/review`.
-  - Render flags grouped by field; show an explicit clean state when there are none.
-  - Handle errors: display `message`, distinguish 422 (fix input) from 502 (service).
-  - _Requirements: 6.2, 6.3_
+## API
 
-- [ ] 11. Dashboard and result view
-  - At the `/dashboard` route, render three sections from `/queued`, `/in-review`,
-    `/completed` using `ScriptSummary`, formatting timestamps in local time and showing
-    empty-state messages.
-  - Link completed rows to a result view backed by `/{id}/result`.
-  - _Requirements: 6.4, 6.9_
+- [x] 11. Server skeleton and error contract
+  - Fastify with CORS, multipart (20 MB), `/api` prefix, `/health`, generic 500 handler,
+    validation issues on 400.
+  - _Requirements: 12.1–12.3_
 
-## Optional hardening (future — not current behavior)
+- [x] 12. Intake routes
+  - `POST /api/prescriptions/upload` (file + `patientId` + `enteredData`), `/text`,
+    `/simulate`, `/scenarios`, `GET /api/prescriptions/{id}/file`, dispatch to the engine.
+  - _Requirements: 1.1–1.8_
 
-- [ ] 12. Decide on persistence and auth
-  - Evaluate replacing in-memory `ScriptQueue` with a datastore so state survives restart,
-    and adding authentication/authorization and PHI-handling controls.
-  - _Requirements: Known Constraints (requirements.md)_
+- [x] 13. Autofill route
+  - `POST /api/prescriptions/extract` → `{ scriptData, extraction }`; `FILE_MISSING` /
+    `UNSUPPORTED_FORMAT` on 422.
+  - _Requirements: 2.1–2.3_
+
+- [x] 14. Engine callback, events, retry and stale sweeper
+  - `POST /api/internal/prescriptions/{id}/engine-callback`, SSE `GET /api/events`,
+    `POST /api/prescriptions/{id}/retry`, sweeper using `PROCESSING_TIMEOUT_MS`.
+  - _Requirements: 8.1, 8.2, 8.4–8.6_
+
+- [x] 15. Pharmacist review actions
+  - `POST /api/prescriptions/{id}/reviews` with the transition map, note requirement,
+    409 while processing, `reviewedAt` on completing statuses, history newest first.
+  - _Requirements: 9.1–9.6_
+
+- [x] 16. Patients and stats
+  - Patient lookup (q / firstName / lastName / dob / phone), detail, create with allergies,
+    conditions and medications; `GET /api/stats` counts.
+  - _Requirements: 10.1–10.3, 11.1, 11.2_
+
+## Web client (`autoscript-ui`)
+
+- [x] 17. API client and types for the Node API
+  - Typed `http` client under `/api`, `patients.ts`, `prescriptions.ts`, `types.ts`;
+    `usePrescriptions` polling hook; remove the old `/api/scripts` client.
+  - _Requirements: 13_
+
+- [x] 18. Intake modal
+  - Script picker, patient lookup/creation (allergies or NKDA, conditions, medications),
+    entry form, Autofill with spinner, submit to `/upload`.
+  - _Requirements: 13.2, 13.3, 13.8_
+
+- [x] 19. Prescription detail
+  - Progress while processing, disposition and reason, findings with evidence and review
+    questions, AI summary, entered-vs-script table, review actions and history, retry.
+  - _Requirements: 13.4–13.6_
+
+- [x] 20. Dashboard, Prescriptions, Patients, Reviews, Analytics, Settings
+  - Status tiles, searchable list, review work queue, analytics totals, settings notes,
+    notifications for prescriptions waiting on review.
+  - _Requirements: 13.1, 13.7, 13.9_
+
+## Tests
+
+- [x] 21. Unit and integration tests
+  - clinical-rules: per-rule tables, entry verification, disposition.
+  - rx-engine: pipeline, extraction, reliability, examples, datasets, eval (fake LLM).
+  - api: end-to-end route tests against `autoscript_test`.
+  - _Requirements: 3, 4, 6, 7, 8, 9, 12_
+
+## Future
+
+- [ ] 22. Authentication, roles (technician vs pharmacist) and an audit log export.
+- [ ] 23. Consume `GET /api/events` in the client instead of polling.
+- [ ] 24. Broaden the rule tables and reference collection beyond the curated demo set.
+- [ ] 25. UI tests for the intake and review flows.
