@@ -3,6 +3,7 @@ package com.springray.autoscript.controllers;
 import com.springray.autoscript.dto.ErrorResponse;
 import com.springray.autoscript.dto.ReviewResult;
 import com.springray.autoscript.dto.ScriptData;
+import com.springray.autoscript.dto.ScriptSummary;
 import com.springray.autoscript.exception.ExtractionFailedException;
 import com.springray.autoscript.exception.InvalidScriptImageException;
 import com.springray.autoscript.exception.ReviewFailedException;
@@ -12,12 +13,16 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
+
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/scripts")
@@ -44,6 +49,28 @@ public class ScriptReviewController {
             @RequestPart("scriptData") ScriptData scriptData) {
         ReviewResult result = scriptReviewService.review(image, scriptData);
         return ResponseEntity.ok(result);
+    }
+
+    @GetMapping("/queued")
+    public ResponseEntity<List<ScriptSummary>> queued() {
+        return ResponseEntity.ok(scriptReviewService.queued());
+    }
+
+    @GetMapping("/in-review")
+    public ResponseEntity<List<ScriptSummary>> inReview() {
+        return ResponseEntity.ok(scriptReviewService.inReview());
+    }
+
+    @GetMapping("/completed")
+    public ResponseEntity<List<ScriptSummary>> completed() {
+        return ResponseEntity.ok(scriptReviewService.completed());
+    }
+
+    @GetMapping("/{id}/result")
+    public ResponseEntity<ReviewResult> reviewResult(@PathVariable String id) {
+        return scriptReviewService.reviewResult(id)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
     }
 
     @ExceptionHandler(InvalidScriptImageException.class)
