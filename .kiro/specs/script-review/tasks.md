@@ -57,19 +57,27 @@ the requirements it satisfies.
     lowest when 0/unset, error on missing configured index, error on no prompts.
   - _Requirements: 4.1, 4.2, 4.3, 4.4_
 
-## Frontend — build the client over the existing API
+## Frontend — build the React client (`autoscript-ui`) over the existing API
 
-- [ ] 8. Scaffold static frontend served by Spring Boot
-  - Add `index.html`, app JS, and CSS under `src/main/resources/static` so the existing
-    Boot server serves them with no extra toolchain.
-  - Add a small API module wrapping the six endpoints and normalizing `ErrorResponse`.
+The Vite + React 19 + TypeScript project is scaffolded and its dev server proxies `/api/*`
+to the backend on `:8080`. `App.tsx` is still the default starter; the tasks below build
+the actual UI.
+
+- [ ] 8. Replace the starter app and add an API client
+  - Remove the default Vite template content from `App.tsx`/`App.css` and set up routing
+    for the Upload & Review view and the `/dashboard` view.
+  - Add a typed API module wrapping the six endpoints and normalizing `ErrorResponse`
+    (fields matching the backend DTOs: `ScriptData`, `ReviewResult`, `Flag`,
+    `ScriptSummary`).
   - _Requirements: 6_
 
 - [ ] 9. Upload + autofill flow
   - File picker with client-side guard for type ∈ {jpeg, png, pdf} and ≤ 10 MB.
   - On select, call `/autofill` and bind returned `ScriptData` to an editable form;
     render null fields as empty inputs (never the literal "null").
-  - _Requirements: 6.1, 6.5, 6.6_
+  - Disable the Autofill control and show a loading indicator while the request is in
+    flight; apply the field guards from Requirement 6.8.
+  - _Requirements: 6.1, 6.5, 6.6, 6.7, 6.8_
 
 - [ ] 10. Review submission + flag display
   - Build multipart with the original image and the edited `scriptData` JSON part (JSON
@@ -79,9 +87,11 @@ the requirements it satisfies.
   - _Requirements: 6.2, 6.3_
 
 - [ ] 11. Dashboard and result view
-  - Render three lists from `/queued`, `/in-review`, `/completed` using `ScriptSummary`.
+  - At the `/dashboard` route, render three sections from `/queued`, `/in-review`,
+    `/completed` using `ScriptSummary`, formatting timestamps in local time and showing
+    empty-state messages.
   - Link completed rows to a result view backed by `/{id}/result`.
-  - _Requirements: 6.4_
+  - _Requirements: 6.4, 6.9_
 
 ## Optional hardening (future — not current behavior)
 
