@@ -1,0 +1,21 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: autoscript-db
+    environment:
+      POSTGRES_USER: autoscript
+      POSTGRES_PASSWORD: autoscript
+      POSTGRES_DB: autoscript
+    ports:
+      - "5433:5432"
+    volumes:
+      - autoscript_pgdata:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autoscript -d autoscript"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  autoscript_pgdata:

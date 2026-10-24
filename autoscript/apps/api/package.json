@@ -1,0 +1,36 @@
+{
+  "name": "@autoscript/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file=../../.env src/index.ts",
+    "start": "tsx --env-file=../../.env src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "prisma generate",
+    "db:migrate": "dotenv -e ../../.env -- prisma migrate deploy && prisma generate",
+    "db:migrate:dev": "dotenv -e ../../.env -- prisma migrate dev",
+    "db:seed": "tsx --env-file=../../.env prisma/seed.ts",
+    "db:reset": "dotenv -e ../../.env -- prisma migrate reset --force --skip-seed && pnpm db:seed",
+    "test": "dotenv -e ../../.env -- vitest run",
+    "db:seed:patients": "tsx --env-file=../../.env prisma/seed.ts --patients-only",
+    "demo:reset": "tsx --env-file=../../.env scripts/demo-reset.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.1",
+    "@fastify/multipart": "^9.0.1",
+    "@prisma/client": "^6.16.2",
+    "@autoscript/clinical-rules": "workspace:*",
+    "@autoscript/shared": "workspace:*",
+    "fastify": "^5.1.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "dotenv-cli": "^7.4.2",
+    "prisma": "^6.16.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}

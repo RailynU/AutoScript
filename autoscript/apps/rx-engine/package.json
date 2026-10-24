@@ -1,0 +1,37 @@
+{
+  "name": "@autoscript/rx-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file=../../.env src/index.ts",
+    "start": "tsx --env-file=../../.env src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "rag:ingest": "tsx --env-file=../../.env scripts/ingest.ts",
+    "rag:ingest:examples": "tsx --env-file=../../.env scripts/ingest-examples.ts",
+    "fixtures": "tsx scripts/fixtures.ts",
+    "test": "dotenv -e ../../.env -- vitest run",
+    "dataset:build": "tsx --env-file=../../.env scripts/build-dataset.ts",
+    "dataset:us": "tsx --env-file=../../.env scripts/build-us-dataset.ts",
+    "eval": "tsx --env-file=../../.env scripts/eval.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.1",
+    "@autoscript/clinical-rules": "workspace:*",
+    "@autoscript/shared": "workspace:*",
+    "fastify": "^5.1.0",
+    "pg": "^8.13.1",
+    "unpdf": "^0.12.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@napi-rs/canvas": "^0.1.60",
+    "@types/node": "^22.9.0",
+    "@types/pg": "^8.11.10",
+    "dotenv-cli": "^7.4.2",
+    "pdf-lib": "^1.17.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}
