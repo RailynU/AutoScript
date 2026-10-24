@@ -5,8 +5,9 @@ import com.springray.autoscript.dto.ReviewResult;
 import com.springray.autoscript.dto.ScriptData;
 import com.springray.autoscript.exception.ExtractionFailedException;
 import com.springray.autoscript.exception.InvalidScriptImageException;
+import com.springray.autoscript.exception.ReviewFailedException;
 import com.springray.autoscript.services.ExtractionService;
-import com.springray.autoscript.services.ScriptValidationService;
+import com.springray.autoscript.services.ScriptReviewService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -23,12 +24,12 @@ import org.springframework.web.multipart.MultipartFile;
 public class ScriptReviewController {
 
     private final ExtractionService extractionService;
-    private final ScriptValidationService scriptValidationService;
+    private final ScriptReviewService scriptReviewService;
 
     public ScriptReviewController(ExtractionService extractionService,
-                                  ScriptValidationService scriptValidationService) {
+                                  ScriptReviewService scriptReviewService) {
         this.extractionService = extractionService;
-        this.scriptValidationService = scriptValidationService;
+        this.scriptReviewService = scriptReviewService;
     }
 
     @PostMapping(value = "/autofill", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -41,8 +42,7 @@ public class ScriptReviewController {
     public ResponseEntity<ReviewResult> review(
             @RequestPart("image") MultipartFile image,
             @RequestPart("scriptData") ScriptData scriptData) {
-        ScriptData extracted = extractionService.extract(image);
-        ReviewResult result = scriptValidationService.review(extracted, scriptData);
+        ReviewResult result = scriptReviewService.review(image, scriptData);
         return ResponseEntity.ok(result);
     }
 
@@ -56,5 +56,11 @@ public class ScriptReviewController {
     public ResponseEntity<ErrorResponse> handleExtractionFailure(ExtractionFailedException e) {
         return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
                 .body(new ErrorResponse("EXTRACTION_FAILED", e.getMessage()));
+    }
+
+    @ExceptionHandler(ReviewFailedException.class)
+    public ResponseEntity<ErrorResponse> handleReviewFailure(ReviewFailedException e) {
+        return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                .body(new ErrorResponse("REVIEW_FAILED", e.getMessage()));
     }
 }

@@ -1,18 +1,22 @@
 package com.springray.autoscript;
 
 import com.springray.autoscript.controllers.ScriptReviewController;
+import com.springray.autoscript.dto.ReviewResult;
 import com.springray.autoscript.dto.ScriptData;
 import com.springray.autoscript.exception.ExtractionFailedException;
 import com.springray.autoscript.exception.InvalidScriptImageException;
+import com.springray.autoscript.exception.ReviewFailedException;
 import com.springray.autoscript.services.ExtractionService;
-import com.springray.autoscript.services.ScriptValidationService;
+import com.springray.autoscript.services.ScriptReviewService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
-import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+
+import java.time.Instant;
+import java.util.List;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
@@ -30,10 +34,14 @@ class ScriptReviewControllerTest {
     private ExtractionService extractionService;
 
     @MockitoBean
-    private ScriptValidationService scriptValidationService;
+    private ScriptReviewService scriptReviewService;
 
     private MockMultipartFile image() {
         return new MockMultipartFile("image", "script.png", "image/png", new byte[]{1, 2, 3});
+    }
+
+    private MockMultipartFile scriptDataPart() {
+        return new MockMultipartFile("scriptData", "", "application/json", "{}".getBytes());
     }
 
     @Test
@@ -68,5 +76,38 @@ class ScriptReviewControllerTest {
         mockMvc.perform(multipart("/api/scripts/autofill").file(image()))
                 .andExpect(status().isBadGateway())
                 .andExpect(jsonPath("$.code").value("EXTRACTION_FAILED"));
+    }
+
+    @Test
+    void reviewReturnsResult() throws Exception {
+        ReviewResult result = new ReviewResult("1", "COMPLETED", Instant.now(), List.of());
+        when(scriptReviewService.review(any(), any())).thenReturn(result);
+
+        mockMvc.perform(multipart("/api/scripts/review").file(image()).file(scriptDataPart()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.scriptId").value("1"))
+                .andExpect(jsonPath("$.status").value("COMPLETED"));
+    }
+
+    @Test
+    void reviewFailureReturns502() throws Exception {
+        when(scriptReviewService.review(any(), any()))
+                .thenThrow(new ReviewFailedException("The script review could not be completed for script 1.",
+                        new RuntimeException("boom")));
+
+        mockMvc.perform(multipart("/api/scripts/review").file(image()).file(scriptDataPart()))
+                .andExpect(status().isBadGateway())
+                .andExpect(jsonPath("$.code").value("REVIEW_FAILED"));
+    }
+
+    @Test
+    void reviewInvalidImageReturns422() throws Exception {
+        when(scriptReviewService.review(any(), any()))
+                .thenThrow(new InvalidScriptImageException("FILE_TOO_LARGE",
+                        "The script image exceeds the 10 MB maximum."));
+
+        mockMvc.perform(multipart("/api/scripts/review").file(image()).file(scriptDataPart()))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("FILE_TOO_LARGE"));
     }
 }
