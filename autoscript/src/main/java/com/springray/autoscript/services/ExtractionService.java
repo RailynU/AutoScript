@@ -1,15 +1,16 @@
 package com.springray.autoscript.services;
 
-import com.springray.autoscript.dto.ScriptData;
-import com.springray.autoscript.exception.ExtractionFailedException;
-import com.springray.autoscript.exception.InvalidScriptImageException;
-import com.springray.autoscript.model.PrescriptionExtractionModel;
+import java.util.Set;
+
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.util.Set;
+import com.springray.autoscript.dto.ScriptData;
+import com.springray.autoscript.exception.ExtractionFailedException;
+import com.springray.autoscript.exception.InvalidScriptImageException;
+import com.springray.autoscript.model.PrescriptionExtractor;
 
 @Service
 @ConditionalOnProperty(name = "autoscript.ai.enabled", havingValue = "true")
@@ -21,9 +22,9 @@ public class ExtractionService {
     private static final Set<String> ACCEPTED_CONTENT_TYPES = Set.of(
             "image/jpeg", "image/png", "application/pdf");
 
-    private final PrescriptionExtractionModel extractionModel;
+    private final PrescriptionExtractor extractionModel;
 
-    public ExtractionService(PrescriptionExtractionModel extractionModel) {
+    public ExtractionService(PrescriptionExtractor extractionModel) {
         this.extractionModel = extractionModel;
     }
 

@@ -20,7 +20,7 @@ export interface ScriptData {
   prescriberPhone: string | null
 }
 
-/** A single issue flagged during review (mirrors backend Flag). */
+/** A single field-level mismatch between entered data and the script image (mirrors backend Flag). */
 export interface Flag {
   field: string
   description: string
@@ -28,7 +28,7 @@ export interface Flag {
   severitySource: string
 }
 
-/** Result of a script review (mirrors backend ReviewResult). */
+/** Result of a review (mirrors backend ReviewResult). */
 export interface ReviewResult {
   scriptId: string
   status: string
@@ -39,6 +39,17 @@ export interface ReviewResult {
    * "No flags detected within checked criteria" — the system never says "safe".
    */
   summary: string
+}
+
+/** Read an error body ({ code, message }) and surface the message when present. */
+async function errorMessage(res: Response, fallback: string): Promise<string> {
+  const text = await res.text().catch(() => '')
+  let message = text || fallback
+  try {
+    const parsed = JSON.parse(text)
+    if (parsed?.message) message = parsed.message
+  } catch { /* not JSON — use raw text */ }
+  return message
 }
 
 export const scriptsApi = {
@@ -60,21 +71,22 @@ export const scriptsApi = {
       throw new ApiError(404, 'AI autofill is not enabled on the server. Enter the details manually.')
     }
     if (!res.ok) {
-      const body = await res.text().catch(() => '')
-      throw new ApiError(res.status, body || `Autofill failed (${res.status})`)
+      throw new ApiError(res.status, await errorMessage(res, `Autofill failed (${res.status})`))
     }
     return res.json() as Promise<ScriptData>
   },
 
   /**
-   * POST /api/scripts/review  (multipart) — send the image plus the
-   * manually-entered/verified scriptData. The backend extracts from the image,
-   * compares against scriptData, and returns a ReviewResult with any flags.
-   * The scriptData part must be JSON (Content-Type application/json).
+   * POST /api/scripts/review  (multipart) — send the prescription image plus the
+   * entered fields as a JSON `scriptData` part. The backend extracts the image and
+   * compares it field-by-field against the entered values, returning a ReviewResult
+   * whose `flags` list every mismatch. Requires autoscript.ai.enabled on the server.
    */
-  async review(image: File, scriptData: ScriptData): Promise<ReviewResult> {
+  async review(image: File, scriptData: Partial<ScriptData>): Promise<ReviewResult> {
     const form = new FormData()
     form.append('image', image)
+    // The scriptData part must carry a JSON content type so the backend's
+    // @RequestPart ScriptData binds it correctly.
     form.append(
       'scriptData',
       new Blob([JSON.stringify(scriptData)], { type: 'application/json' }),
@@ -89,8 +101,7 @@ export const scriptsApi = {
       throw new ApiError(404, 'AI review is not enabled on the server.')
     }
     if (!res.ok) {
-      const body = await res.text().catch(() => '')
-      throw new ApiError(res.status, body || `Review failed (${res.status})`)
+      throw new ApiError(res.status, await errorMessage(res, `Review failed (${res.status})`))
     }
     return res.json() as Promise<ReviewResult>
   },

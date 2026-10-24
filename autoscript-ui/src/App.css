@@ -1459,6 +1459,36 @@ tbody td {
   line-height: 1.4;
 }
 
+/* Review flags — field-by-field mismatches returned by /scripts/review */
+.review-flags {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.review-flag {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-left: 3px solid #f59e0b;
+  border-radius: 6px;
+  padding: 7px 10px;
+}
+.review-flag-field {
+  font-weight: 600;
+  color: #92400e;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+.review-flag-desc { color: #475569; line-height: 1.4; }
+
 /* Responsive: stack preview above the form on narrow screens */
 @media (max-width: 760px) {
   .details-layout { grid-template-columns: 1fr; }
