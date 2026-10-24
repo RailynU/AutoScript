@@ -1223,3 +1223,235 @@ tbody td {
 
 /* ── Signal chevron animation ── */
 .signal-chevron { transition: transform 0.2s; }
+
+/* Active status-filter pill (shown next to the search box when a stat card is clicked) */
+.active-filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: #eff6ff;
+  color: #2563eb;
+  border: 1px solid #bfdbfe;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.active-filter-pill button {
+  background: none;
+  border: none;
+  color: #2563eb;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.active-filter-pill button:hover { color: #1d4ed8; }
+
+/* ─────────────────────────────────────────
+   NEW PRESCRIPTION — DETAILS TWO-PANEL LAYOUT
+───────────────────────────────────────── */
+.modal--wide { width: 95vw; }
+
+.details-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+/* LEFT — preview panel. Sticky so it stays visible while the form scrolls. */
+.details-preview {
+  position: sticky;
+  top: 0;
+  align-self: start;
+}
+
+.preview-panel {
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  height: 460px;
+}
+
+.preview-panel--empty {
+  background: #f8fafc;
+  border: 1.5px dashed #cbd5e1;
+}
+
+.preview-filename {
+  font-size: 12px;
+  color: #cbd5e1;
+  padding: 8px 12px;
+  background: #1e293b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+}
+
+.preview-stage {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  background:
+    repeating-conic-gradient(#1e293b 0% 25%, #0f172a 0% 50%) 50% / 24px 24px;
+}
+
+.preview-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transition: transform 0.15s ease;
+  transform-origin: center center;
+  user-select: none;
+}
+
+.preview-pdf {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+  transition: transform 0.15s ease;
+}
+
+.preview-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  background: #1e293b;
+  border-top: 1px solid #334155;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.preview-btn {
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid #334155;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 13px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s;
+}
+.preview-btn:hover { background: #334155; }
+
+.preview-zoom {
+  font-size: 12px;
+  color: #94a3b8;
+  min-width: 42px;
+  text-align: center;
+}
+.preview-sep { width: 1px; height: 18px; background: #334155; margin: 0 4px; }
+
+/* Empty / error state inside preview */
+.preview-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  padding: 24px;
+  color: #64748b;
+}
+.preview-empty-icon { font-size: 36px; }
+.preview-empty p { font-size: 13px; }
+.preview-empty-sub { font-size: 12px; color: #94a3b8; }
+
+/* Fullscreen overlay */
+.preview-fullscreen {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.95);
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+}
+.preview-fullscreen-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #0f172a;
+  border-bottom: 1px solid #1e293b;
+  flex-wrap: wrap;
+}
+.preview-fullscreen-stage {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.preview-fullscreen-stage .preview-img { max-height: none; }
+.preview-fullscreen-stage .preview-pdf { width: 80vw; height: 85vh; }
+
+/* RIGHT — form column */
+.details-form {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.entry-mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 16px;
+}
+.entry-mode-label { font-size: 13px; font-weight: 700; color: #0f172a; }
+
+.btn-autofill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1.5px solid #8b5cf6;
+  background: #f5f3ff;
+  color: #7c3aed;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+.btn-autofill:hover:not(:disabled) { background: #8b5cf6; color: #fff; }
+.btn-autofill:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.autofill-note {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #6d28d9;
+  background: #f5f3ff;
+  border: 1px solid #ddd6fe;
+  border-radius: 8px;
+  padding: 8px 12px;
+  line-height: 1.4;
+}
+
+/* Responsive: stack preview above the form on narrow screens */
+@media (max-width: 760px) {
+  .details-layout { grid-template-columns: 1fr; }
+  .details-preview { position: static; }
+  .preview-panel { height: 320px; }
+  .modal--wide { width: 95vw; }
+}

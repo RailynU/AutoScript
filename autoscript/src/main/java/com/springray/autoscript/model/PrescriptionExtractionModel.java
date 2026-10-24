@@ -2,6 +2,7 @@ package com.springray.autoscript.model;
 
 import com.springray.autoscript.dto.ScriptData;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Component;
@@ -14,6 +15,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 
 @Component
+@ConditionalOnProperty(name = "autoscript.ai.enabled", havingValue = "true")
 public class PrescriptionExtractionModel {
 
     private final ChatClient chatClient;

@@ -10,11 +10,13 @@ public class WebConfig implements WebMvcConfigurer {
     @Override
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/api/**")
-                .allowedOrigins(
-                    "http://localhost:5173",   // Vite dev server
-                    "http://localhost:4173"    // Vite preview
+                // allowedOriginPatterns supports wildcards — any localhost port
+                // (Vite may pick 5173, 5174, … if one is taken) plus 127.0.0.1.
+                .allowedOriginPatterns(
+                    "http://localhost:*",
+                    "http://127.0.0.1:*"
                 )
-                .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
+                .allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
                 .allowedHeaders("*")
                 .allowCredentials(false);
     }

@@ -7,6 +7,7 @@ import com.springray.autoscript.exception.InvalidScriptImageException;
 import com.springray.autoscript.exception.ReviewFailedException;
 import com.springray.autoscript.model.Script;
 import com.springray.autoscript.model.ScriptStatus;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -15,6 +16,7 @@ import java.util.List;
 import java.util.Optional;
 
 @Service
+@ConditionalOnProperty(name = "autoscript.ai.enabled", havingValue = "true")
 public class ScriptReviewService {
 
     private final ScriptQueue scriptQueue;

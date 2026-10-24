@@ -4,6 +4,7 @@ import com.springray.autoscript.dto.ScriptData;
 import com.springray.autoscript.exception.ExtractionFailedException;
 import com.springray.autoscript.exception.InvalidScriptImageException;
 import com.springray.autoscript.model.PrescriptionExtractionModel;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
@@ -11,6 +12,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.util.Set;
 
 @Service
+@ConditionalOnProperty(name = "autoscript.ai.enabled", havingValue = "true")
 public class ExtractionService {
 
     private static final long MAX_FILE_SIZE_BYTES = 10L * 1024 * 1024;

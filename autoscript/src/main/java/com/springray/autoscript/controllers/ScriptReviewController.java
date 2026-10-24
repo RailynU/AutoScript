@@ -24,9 +24,11 @@ import com.springray.autoscript.exception.InvalidScriptImageException;
 import com.springray.autoscript.exception.ReviewFailedException;
 import com.springray.autoscript.services.ExtractionService;
 import com.springray.autoscript.services.ScriptReviewService;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 
 @RestController
 @RequestMapping("/api/scripts")
+@ConditionalOnProperty(name = "autoscript.ai.enabled", havingValue = "true")
 public class ScriptReviewController {
 
     private final ExtractionService extractionService;
