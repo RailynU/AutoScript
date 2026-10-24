@@ -1,71 +1,21 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import './App.css'
 
 // Backend-driven data layer
-import { prescriptionsApi, statusMeta } from './api/prescriptions'
-import { patientsApi } from './api/patients'
+import { prescriptionsApi, statusMeta, severityRank, REVIEW_STATUS_LABEL } from './api/prescriptions'
+import { patientsApi, formatDob, fullName, normalizePhone, parseList, toIsoDob } from './api/patients'
 import { usePrescriptions } from './hooks/usePrescriptions'
 import { avatarColor, initials } from './ui/avatar'
 import { PrescriptionPreview } from './components/PrescriptionPreview'
-import { scriptsApi } from './api/scripts'
-import type { ScriptData, Flag, ReviewResult } from './api/scripts'
-import { ApiError } from './api/client'
-
-/**
- * Convert a patient DOB to the ISO yyyy-MM-dd form the backend ScriptData
- * (a LocalDate) expects. Accepts "MM/DD/YYYY" or an already-ISO string;
- * returns null if it can't be parsed.
- */
-function toIsoDob(dob: string | null | undefined): string | null {
-  if (!dob) return null
-  const s = dob.trim()
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s            // already ISO
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)   // MM/DD/YYYY
-  if (m) {
-    const [, mm, dd, yyyy] = m
-    return `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`
-  }
-  return null
-}
+import { PrescriptionDetail, SeverityChip } from './components/PrescriptionDetail'
+import { API_BASE, ApiError } from './api/client'
 import type {
   ApiPatient,
   ApiPrescription,
+  CreatePatientRequest,
   PrescriptionStatus,
+  ScriptData,
 } from './api/types'
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Thin fetch shim — kept so existing inline callers keep working while the app
-// migrates to the api/ + hooks/ layer. New code should import from ./api/*.
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
-  const method = (options?.method ?? 'GET').toUpperCase()
-  const body = options?.body ? JSON.parse(options.body as string) : undefined
-
-  if (path === '/prescriptions' && method === 'GET') return prescriptionsApi.list() as Promise<T>
-  if (path === '/prescriptions/stats')               return prescriptionsApi.stats() as Promise<T>
-  if (path.startsWith('/prescriptions?q=')) {
-    const q = decodeURIComponent(path.split('q=')[1] ?? '')
-    return prescriptionsApi.list(q) as Promise<T>
-  }
-  if (path === '/prescriptions' && method === 'POST') return prescriptionsApi.create(body) as Promise<T>
-  const statusMatch = path.match(/^\/prescriptions\/(\d+)\/status$/)
-  if (statusMatch && method === 'PATCH') {
-    return prescriptionsApi.updateStatus(Number(statusMatch[1]), body.status, body.substatus) as Promise<T>
-  }
-  if (path === '/patients' && method === 'GET')  return patientsApi.search() as Promise<T>
-  if (path === '/patients' && method === 'POST') return patientsApi.create(body) as Promise<T>
-  if (path.startsWith('/patients?')) {
-    const sp = new URLSearchParams(path.split('?')[1])
-    return patientsApi.search({
-      firstName: sp.get('firstName') ?? undefined,
-      lastName:  sp.get('lastName')  ?? undefined,
-      dob:       sp.get('dob')       ?? undefined,
-      phone:     sp.get('phone')     ?? undefined,
-    }) as Promise<T>
-  }
-  throw new Error(`Unmapped API path: ${method} ${path}`)
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared UI components
@@ -81,7 +31,7 @@ function Badge({ status }: { status: string }) {
   )
 }
 
-function Avatar({ id, fn, ln, size = 36 }: { id: number; fn: string; ln: string; size?: number }) {
+function Avatar({ id, fn, ln, size = 36 }: { id: string; fn: string; ln: string; size?: number }) {
   return (
     <div className="patient-avatar"
       style={{ background: avatarColor(id), width: size, height: size, fontSize: size * 0.35 }}>
@@ -98,11 +48,36 @@ function ApiErrorBanner({ message }: { message: string }) {
   return (
     <div className="api-error" role="alert">
       ⚠️ {message}
-      {message.includes('fetch') || message.includes('Failed') || message.includes('Network')
-        ? ' — Make sure the Spring Boot server is running on port 8080.'
-        : ''}
     </div>
   )
+}
+
+/** Status badge + what the engine is doing / found, for table rows. */
+function StatusCell({ rx }: { rx: ApiPrescription }) {
+  return (
+    <>
+      <Badge status={rx.status} />
+      {rx.status === 'PROCESSING' && (
+        <div className="row-progress">
+          <div className="progress-track"><div className="progress-fill" style={{ width: `${rx.progressPercent}%` }} /></div>
+          <span>{rx.progressMessage}</span>
+        </div>
+      )}
+      {rx.status !== 'PROCESSING' && rx.findingCount > 0 && (
+        <div className="row-findings"><SeverityChip severity={rx.highestSeverity} /> {rx.findingCount} finding{rx.findingCount !== 1 ? 's' : ''}</div>
+      )}
+      {rx.status === 'FAILED' && rx.failureReason && <div className="row-sub">{rx.failureReason.slice(0, 80)}</div>}
+      {rx.reviewStatus !== 'PENDING_REVIEW' && <div className="row-sub">{REVIEW_STATUS_LABEL[rx.reviewStatus]}</div>}
+    </>
+  )
+}
+
+function rxTime(rx: ApiPrescription): string {
+  return new Date(rx.createdAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+}
+
+function rxMedication(rx: ApiPrescription): string {
+  return rx.medicationSummary.length ? rx.medicationSummary.join(', ') : (rx.status === 'PROCESSING' ? 'Reading script…' : '—')
 }
 
 // Icons
@@ -151,22 +126,101 @@ function CheckIcon() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// New-patient form (shared by the intake modal and the Patients page)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface NewPatientForm {
+  firstName: string; lastName: string; dob: string; phone: string
+  allergies: string; nkda: boolean; medications: string; conditions: string
+}
+
+export const EMPTY_PATIENT: NewPatientForm = { firstName: '', lastName: '', dob: '', phone: '', allergies: '', nkda: false, medications: '', conditions: '' }
+
+/** Form → POST /api/patients body. Allergies typed as "Penicillin (rash)" keep the reaction. */
+function toCreatePatient(f: NewPatientForm): CreatePatientRequest | string {
+  const dateOfBirth = toIsoDob(f.dob)
+  if (!f.firstName.trim() || !f.lastName.trim()) return 'First and last name are required.'
+  if (!dateOfBirth) return 'Date of birth must be MM/DD/YYYY.'
+  const allergies = f.nkda ? [{ substance: 'NKDA', reaction: null, severity: 'UNKNOWN' as const }]
+    : parseList(f.allergies).map(a => {
+        const m = a.match(/^(.*?)\s*\((.*)\)\s*$/)
+        const reaction = m ? m[2] : null
+        return { substance: (m ? m[1] : a).trim(), reaction, severity: /anaphyla|severe/i.test(a) ? 'SEVERE' as const : 'UNKNOWN' as const }
+      })
+  return {
+    firstName: f.firstName.trim(),
+    lastName: f.lastName.trim(),
+    dateOfBirth,
+    phone: normalizePhone(f.phone) || null,
+    allergiesVerified: f.nkda || allergies.length > 0,
+    allergies,
+    conditions: parseList(f.conditions).map(name => ({ name, status: 'ACTIVE' as const })),
+    medications: parseList(f.medications).map(name => ({ name, active: true })),
+  }
+}
+
+function PatientFields({ form, setForm }: { form: NewPatientForm; setForm: (f: (p: NewPatientForm) => NewPatientForm) => void }) {
+  const set = (k: keyof NewPatientForm) => (e: React.ChangeEvent<HTMLInputElement>) => setForm(p => ({ ...p, [k]: e.target.value }))
+  return (
+    <div className="create-form-grid">
+      <div className="field-group">
+        <label className="field-label">First Name <span className="req">*</span></label>
+        <input className="field-input" type="text" placeholder="e.g. Emily" value={form.firstName} onChange={set('firstName')} />
+      </div>
+      <div className="field-group">
+        <label className="field-label">Last Name <span className="req">*</span></label>
+        <input className="field-input" type="text" placeholder="e.g. Carter" value={form.lastName} onChange={set('lastName')} />
+      </div>
+      <div className="field-group">
+        <label className="field-label">Date of Birth <span className="req">*</span></label>
+        <input className="field-input" type="text" placeholder="MM/DD/YYYY" value={form.dob} onChange={set('dob')} />
+      </div>
+      <div className="field-group">
+        <label className="field-label">Phone</label>
+        <input className="field-input" type="text" placeholder="(555) 000-0000" value={form.phone} onChange={set('phone')} />
+      </div>
+      <div className="field-group" style={{ gridColumn: '1 / -1' }}>
+        <label className="field-label">Allergies</label>
+        <input className="field-input" type="text" disabled={form.nkda} placeholder="e.g. Penicillin (hives), Sulfa"
+          value={form.nkda ? '' : form.allergies} onChange={set('allergies')} />
+        <label className="checkbox-row">
+          <input type="checkbox" checked={form.nkda} onChange={e => setForm(p => ({ ...p, nkda: e.target.checked }))} />
+          No known drug allergies (NKDA), confirmed with the patient
+        </label>
+      </div>
+      <div className="field-group" style={{ gridColumn: '1 / -1' }}>
+        <label className="field-label">Current medications</label>
+        <input className="field-input" type="text" placeholder="e.g. Warfarin 5 mg daily, Metformin 500 mg" value={form.medications} onChange={set('medications')} />
+      </div>
+      <div className="field-group" style={{ gridColumn: '1 / -1' }}>
+        <label className="field-label">Conditions</label>
+        <input className="field-input" type="text" placeholder="e.g. Atrial fibrillation, CKD stage 3" value={form.conditions} onChange={set('conditions')} />
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Upload / New Prescription Modal
 // ─────────────────────────────────────────────────────────────────────────────
 
+const MAX_FILE_BYTES = 10 * 1024 * 1024
+const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'application/pdf']
+
 interface UploadModalProps {
   onClose: () => void
-  onCreated: () => void
+  onCreated: (prescriptionId: string) => void
   preselectedPatient?: ApiPatient | null
 }
 
 function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProps) {
-  const [step, setStep]               = useState<'file' | 'patient' | 'rx'>(preselectedPatient ? 'rx' : 'file')
+  const [step, setStep]               = useState<'file' | 'patient' | 'rx'>('file')
   const [patient, setPatient]         = useState<ApiPatient | null>(preselectedPatient ?? null)
   const [file, setFile]               = useState<File | null>(null)
+  const [fileError, setFileError]     = useState<string | null>(null)
   const fileName = file?.name ?? null
 
-  // Patient lookup form state (replaces the old "load all patients" list).
+  // Patient lookup form state.
   const [lookupFirst, setLookupFirst] = useState('')
   const [lookupLast,  setLookupLast]  = useState('')
   const [lookupDob,   setLookupDob]   = useState('')
@@ -174,49 +228,42 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
   const [ptResults, setPtResults]     = useState<ApiPatient[] | null>(null) // null = no search run yet
   const [ptLoading, setPtLoading]     = useState(false)
 
-  // Rx form fields. All six are collected separately in the UI, then composed
-  // into the backend's limited shape on submit (see handleCreate).
+  // Manual entry — the technician types what is on the script; the engine verifies it.
   const [drugName,     setDrugName]     = useState('')
   const [directions,   setDirections]   = useState('')
   const [quantity,     setQuantity]     = useState('')
   const [daySupply,    setDaySupply]    = useState('')
-  const [prescriberName, setPrescriberName] = useState('Dr. Jane Doe')
-  const [npiDea,       setNpiDea]       = useState('')
+  const [refills,      setRefills]      = useState('')
+  const [prescriberName, setPrescriberName] = useState('')
+  const [npi,          setNpi]          = useState('')
   const [saving,  setSaving]          = useState(false)
   const [error,   setError]           = useState<string | null>(null)
   const [autofilling, setAutofilling] = useState(false)
   const [autofillNote, setAutofillNote] = useState<string | null>(null)
-  const [reviewing, setReviewing]     = useState(false)
-  const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null)
-  const [reviewNote, setReviewNote]   = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   // Create-new-patient fallback (shown when a lookup returns no matches).
   const [showCreatePt, setShowCreatePt] = useState(false)
   const [creatingPt, setCreatingPt]     = useState(false)
-  const [newPt, setNewPt] = useState({ firstName: '', lastName: '', dob: '', phone: '', email: '' })
+  const [newPt, setNewPt] = useState<NewPatientForm>(EMPTY_PATIENT)
 
   function pickFile(f: File | undefined | null) {
     // Only accept a new file when none is currently loaded — the user must
     // remove the current image before uploading another.
-    if (f && !file) setFile(f)
+    if (!f || file) return
+    if (!ACCEPTED_TYPES.includes(f.type)) { setFileError('The script must be a JPEG, PNG, or PDF file.'); return }
+    if (f.size > MAX_FILE_BYTES) { setFileError('The script exceeds the 10 MB maximum.'); return }
+    setFileError(null)
+    setFile(f)
   }
 
   async function handleCreatePatient() {
-    if (!newPt.firstName.trim() || !newPt.lastName.trim() || !newPt.dob.trim()) return
+    const body = toCreatePatient(newPt)
+    if (typeof body === 'string') { setError(body); return }
     setCreatingPt(true)
     setError(null)
     try {
-      const created = await apiFetch<ApiPatient>('/patients', {
-        method: 'POST',
-        body: JSON.stringify({
-          firstName: newPt.firstName.trim(),
-          lastName:  newPt.lastName.trim(),
-          dob:       newPt.dob.trim(),
-          phone:     newPt.phone.trim() || null,
-          email:     newPt.email.trim() || null,
-        }),
-      })
+      const created = await patientsApi.create(body)
       setPatient(created)          // auto-select the new patient
       setShowCreatePt(false)
       setPtResults([created])      // reflect it in the results list
@@ -233,82 +280,32 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
     setAutofillNote(null)
     setError(null)
     try {
-      const data = await scriptsApi.autofill(file)
-      // Map extracted fields onto the six rx form fields. Only overwrite a
-      // field when the AI actually returned a value for it.
+      const { scriptData: data } = await prescriptionsApi.extract(file)
+      // Only overwrite a field when the AI actually returned a value for it.
       if (data.drugName)       setDrugName(data.drugName)
       if (data.directions)     setDirections(data.directions)
-      if (data.quantity != null)  setQuantity(String(data.quantity))
-      if (data.daySupply != null) setDaySupply(String(data.daySupply))
+      if (data.quantity != null)    setQuantity(String(data.quantity))
+      if (data.daySupply != null)   setDaySupply(String(data.daySupply))
+      if (data.refillCount != null) setRefills(String(data.refillCount))
       if (data.prescriberName) setPrescriberName(data.prescriberName)
-      if (data.prescriberNpi)  setNpiDea(data.prescriberNpi)
-      setAutofillNote('✨ Fields autofilled from the image. Please verify against the prescription before starting review.')
+      if (data.prescriberNpi)  setNpi(data.prescriberNpi)
+      setAutofillNote('✨ Fields autofilled from the image. Verify them against the prescription before submitting.')
     } catch (e) {
-      if (e instanceof ApiError && e.status === 404) {
-        setAutofillNote('AI autofill is not enabled on the server. Enter the details manually while viewing the image.')
-      } else {
-        setAutofillNote(e instanceof Error ? e.message : 'Autofill failed. Enter the details manually.')
-      }
+      setAutofillNote(e instanceof Error ? `Autofill failed: ${e.message}. Enter the details manually.` : 'Autofill failed. Enter the details manually.')
     } finally {
       setAutofilling(false)
     }
   }
 
-  // "Verify against image": compare the entered fields with what the model reads
-  // from the image, and show any mismatches inline before saving.
-  async function handleReview() {
-    if (!file) return
-    setReviewing(true)
-    setReviewNote(null)
-    setReviewResult(null)
-    setError(null)
-    try {
-      // Patient identity comes from the selected patient record; the rest from
-      // the six clinical fields on the form.
-      const result = await scriptsApi.review(file, {
-        patientFirstName:   patient?.firstName ?? null,
-        patientLastName:    patient?.lastName ?? null,
-        patientDateOfBirth: toIsoDob(patient?.dob),
-        drugName:       drugName.trim() || null,
-        directions:     directions.trim() || null,
-        quantity:       quantity.trim() ? Number(quantity) : null,
-        daySupply:      daySupply.trim() ? Number(daySupply) : null,
-        prescriberName: prescriberName.trim() || null,
-        prescriberNpi:  npiDea.trim() || null,
-      })
-      setReviewResult(result)
-      // Never claim the script is "safe": use the backend's summary wording.
-      setReviewNote(result.flags.length === 0
-        ? `✅ ${result.summary}`
-        : `⚠️ ${result.flags.length} field${result.flags.length !== 1 ? 's' : ''} differ from the image. Review the flags below.`)
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 404) {
-        setReviewNote('AI review is not enabled on the server.')
-      } else {
-        setReviewNote(e instanceof Error ? e.message : 'Review could not be completed.')
-      }
-    } finally {
-      setReviewing(false)
-    }
-  }
-
-  // Run a patient lookup against GET /api/patients with the entered params
-  // (partial match). Only the matching results are shown — we never load all
-  // patients up front.
+  // Run a patient lookup with the entered params (partial match).
   async function handlePatientSearch() {
     setPtLoading(true)
     setError(null)
     setShowCreatePt(false)
     try {
-      const params = new URLSearchParams()
-      if (lookupFirst.trim()) params.set('firstName', lookupFirst.trim())
-      if (lookupLast.trim())  params.set('lastName',  lookupLast.trim())
-      if (lookupDob.trim())   params.set('dob',       lookupDob.trim())
-      if (lookupPhone.trim()) params.set('phone',     lookupPhone.trim())
-      const results = await apiFetch<ApiPatient[]>(`/patients?${params.toString()}`)
+      const results = await patientsApi.search({ firstName: lookupFirst, lastName: lookupLast, dob: lookupDob, phone: lookupPhone })
       setPtResults(results)
-      // Pre-fill the create-patient form with whatever was typed, so if there
-      // are no matches the user can create a profile without retyping.
+      // Pre-fill the create-patient form with whatever was typed.
       setNewPt(p => ({
         ...p,
         firstName: lookupFirst.trim() || p.firstName,
@@ -324,72 +321,42 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
     }
   }
 
-  // Are all six required rx fields filled? (quantity / daySupply must be numeric)
-  const rxValid =
-    drugName.trim() !== '' &&
-    directions.trim() !== '' &&
-    quantity.trim() !== '' && !Number.isNaN(Number(quantity)) &&
-    daySupply.trim() !== '' && !Number.isNaN(Number(daySupply)) &&
-    prescriberName.trim() !== '' &&
-    npiDea.trim() !== ''
+  const num = (s: string) => (s.trim() && !Number.isNaN(Number(s)) ? Number(s) : null)
+  const guardError =
+    drugName.length > 200 ? 'Drug name must be 200 characters or fewer.'
+    : directions.length > 500 ? 'Directions must be 500 characters or fewer.'
+    : quantity && !(Number(quantity) >= 1 && Number(quantity) <= 9999) ? 'Quantity must be 1–9999.'
+    : daySupply && !(Number(daySupply) >= 1 && Number(daySupply) <= 365) ? 'Day supply must be 1–365.'
+    : refills && !(Number(refills) >= 0 && Number(refills) <= 99) ? 'Refills must be 0–99.'
+    : npi && !/^\d{10}$/.test(npi.replace(/\D/g, '')) ? 'NPI must be exactly 10 digits.'
+    : null
+
+  const rxValid = drugName.trim() !== '' && directions.trim() !== '' && quantity.trim() !== '' && !guardError
 
   async function handleCreate() {
-    if (!patient || !rxValid) return
+    if (!patient || !file || !rxValid) return
     setSaving(true)
     setError(null)
     try {
-      // 1) Persist the prescription record. The backend prescription entity has
-      //    { patientId, medication, dosage, instructions, prescriber }, so the
-      //    six UI fields are composed into that shape:
-      //      medication   = Drug Name
-      //      instructions = Directions
-      //      dosage       = "Qty {quantity} · {daySupply}-day supply"
-      //      prescriber   = "{prescriberName} (NPI/DEA: {npiDea})"
-      await apiFetch('/prescriptions', {
-        method: 'POST',
-        body: JSON.stringify({
-          patientId:    patient.id,
-          medication:   drugName.trim(),
-          dosage:       `Qty ${quantity.trim()} · ${daySupply.trim()}-day supply`,
-          instructions: directions.trim(),
-          prescriber:   `${prescriberName.trim()} (NPI/DEA: ${npiDea.trim()})`,
-        }),
-      })
-
-      // 2) If we have the image, send it + the verified fields to the AI review
-      //    endpoint so the backend can cross-check for dispensing errors.
-      //    This is best-effort: if AI is disabled (404) or unreachable, the
-      //    prescription is still created — we just skip the automated flags.
-      if (file) {
-        try {
-          const scriptData: ScriptData = {
-            patientFirstName:   patient.firstName,
-            patientLastName:    patient.lastName,
-            patientDateOfBirth: toIsoDob(patient.dob),
-            drugName:           drugName.trim(),
-            directions:         directions.trim(),
-            quantity:           Number(quantity),
-            daySupply:          Number(daySupply),
-            refillCount:        null,
-            prescriberName:     prescriberName.trim(),
-            prescriberNpi:      npiDea.trim(),
-            prescriberPhone:    null,
-          }
-          await scriptsApi.review(file, scriptData)
-        } catch (reviewErr) {
-          // Non-fatal — the record is saved; the AI review is optional.
-          if (reviewErr instanceof ApiError && reviewErr.status === 404) {
-            // AI not enabled on the server; nothing to do.
-          } else {
-            console.warn('AI review skipped:', reviewErr)
-          }
-        }
+      const enteredData: ScriptData = {
+        patientFirstName:   patient.firstName,
+        patientLastName:    patient.lastName,
+        patientDateOfBirth: patient.dateOfBirth,
+        drugName:       drugName.trim(),
+        directions:     directions.trim(),
+        quantity:       num(quantity),
+        daySupply:      num(daySupply),
+        refillCount:    num(refills),
+        prescriberName: prescriberName.trim() || null,
+        prescriberNpi:  npi.replace(/\D/g, '') || null,
+        prescriberPhone: null,
       }
-
-      onCreated()
+      // The engine reads the script, verifies this entry against it, and runs the clinical checks.
+      const rx = await prescriptionsApi.upload(file, patient.id, enteredData)
+      onCreated(rx.id)
       onClose()
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to create prescription')
+      setError(e instanceof Error ? e.message : 'Failed to submit prescription')
       setSaving(false)
     }
   }
@@ -406,7 +373,7 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
             <p>
               {step === 'file'    && 'Upload or drop a prescription image / PDF'}
               {step === 'patient' && 'Select the patient for this prescription'}
-              {step === 'rx'      && 'Enter medication details'}
+              {step === 'rx'      && 'Enter the prescription exactly as written — AutoScript verifies it against the image'}
             </p>
           </div>
           <button className="modal-close" onClick={onClose} aria-label="Close"><XIcon /></button>
@@ -434,7 +401,6 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
                 onChange={e => { pickFile(e.target.files?.[0]); e.target.value = '' }} />
 
               {!file ? (
-                // No file yet — show the drop zone.
                 <div className="drop-zone" role="button" tabIndex={0}
                   onClick={() => fileRef.current?.click()}
                   onKeyDown={e => e.key === 'Enter' && fileRef.current?.click()}
@@ -447,8 +413,6 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
                   <p className="formats">Supports JPG, PNG, PDF (max 10MB)</p>
                 </div>
               ) : (
-                // A file is loaded — lock the uploader. To change it the user
-                // must first remove the current image.
                 <div className="uploaded-file-card">
                   <div className="uploaded-file-info">
                     <span className="uploaded-file-icon">📄</span>
@@ -462,10 +426,11 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
                   </button>
                 </div>
               )}
+              {fileError && <ApiErrorBanner message={fileError} />}
 
               <div className="modal-footer" style={{ marginTop: 16 }}>
                 <button className="btn-cancel" onClick={onClose}>Cancel</button>
-                <button className="btn-primary" disabled={!file} onClick={() => setStep('patient')}>
+                <button className="btn-primary" disabled={!file} onClick={() => setStep(preselectedPatient ? 'rx' : 'patient')}>
                   Proceed <ChevronRight />
                 </button>
               </div>
@@ -475,16 +440,13 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
           {/* Step 2 — Patient lookup: image preview (left) + lookup/create (right) */}
           {step === 'patient' && (
             <div className="details-layout">
-              {/* LEFT — the uploaded script, visible while looking up the patient */}
               <div className="details-preview">
                 <PrescriptionPreview file={file} onReupload={() => setStep('file')} />
               </div>
 
-              {/* RIGHT — lookup form + results, or the create-patient fallback */}
               <div className="details-form">
                 {!showCreatePt ? (
                   <>
-                    {/* Lookup form — search GET /api/patients by partial match */}
                     <form className="create-form-grid" style={{ marginBottom: 12 }}
                       onSubmit={e => { e.preventDefault(); handlePatientSearch() }}>
                       <div className="field-group">
@@ -515,7 +477,6 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
                       </div>
                     </form>
 
-                    {/* Results — only matching patients */}
                     {ptResults !== null && !ptLoading && (
                       <>
                         <div className="patient-list" role="listbox" style={{ maxHeight: 220, overflowY:'auto' }}>
@@ -528,15 +489,14 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
                             >
                               <Avatar id={p.id} fn={p.firstName} ln={p.lastName} />
                               <div className="patient-details">
-                                <div className="pname">{p.fullName}</div>
-                                <div className="pmeta">DOB {p.dob} • {p.phone ?? '—'}</div>
+                                <div className="pname">{fullName(p)}</div>
+                                <div className="pmeta">DOB {formatDob(p.dateOfBirth)} • {p.phone ?? '—'}</div>
                               </div>
                               {patient?.id === p.id && <span style={{ color:'#2563eb', marginLeft:'auto' }}><CheckIcon /></span>}
                             </div>
                           ))}
                         </div>
 
-                        {/* No matches → offer to create a new patient profile */}
                         {ptResults.length === 0 && (
                           <div className="no-match-create">
                             <p className="no-match-text">No matching patient found.</p>
@@ -549,39 +509,12 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
                     )}
                   </>
                 ) : (
-                  /* Create-new-patient form (prefilled from the lookup fields) */
                   <div className="create-pt-panel">
                     <div className="entry-mode-row" style={{ marginTop: 0 }}>
                       <span className="entry-mode-label">New patient profile</span>
                       <button className="chip-change" onClick={() => setShowCreatePt(false)}>Back to search</button>
                     </div>
-                    <div className="create-form-grid" style={{ marginTop: 12 }}>
-                      <div className="field-group">
-                        <label className="field-label">First Name <span className="req">*</span></label>
-                        <input className="field-input" type="text" value={newPt.firstName}
-                          onChange={e => setNewPt(p => ({ ...p, firstName: e.target.value }))} />
-                      </div>
-                      <div className="field-group">
-                        <label className="field-label">Last Name <span className="req">*</span></label>
-                        <input className="field-input" type="text" value={newPt.lastName}
-                          onChange={e => setNewPt(p => ({ ...p, lastName: e.target.value }))} />
-                      </div>
-                      <div className="field-group">
-                        <label className="field-label">DOB <span className="req">*</span></label>
-                        <input className="field-input" type="text" placeholder="MM/DD/YYYY" value={newPt.dob}
-                          onChange={e => setNewPt(p => ({ ...p, dob: e.target.value }))} />
-                      </div>
-                      <div className="field-group">
-                        <label className="field-label">Phone</label>
-                        <input className="field-input" type="text" value={newPt.phone}
-                          onChange={e => setNewPt(p => ({ ...p, phone: e.target.value }))} />
-                      </div>
-                      <div className="field-group" style={{ gridColumn:'1 / -1' }}>
-                        <label className="field-label">Email</label>
-                        <input className="field-input" type="email" value={newPt.email}
-                          onChange={e => setNewPt(p => ({ ...p, email: e.target.value }))} />
-                      </div>
-                    </div>
+                    <div style={{ marginTop: 12 }}><PatientFields form={newPt} setForm={setNewPt} /></div>
                     <button className="btn-primary" style={{ marginTop: 12 }}
                       disabled={creatingPt || !newPt.firstName.trim() || !newPt.lastName.trim() || !newPt.dob.trim()}
                       onClick={handleCreatePatient}>
@@ -590,13 +523,12 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
                   </div>
                 )}
 
-                {/* Selected patient confirmation */}
                 {patient && !showCreatePt && (
                   <div className="selected-patient-chip" style={{ marginTop: 12 }}>
                     <Avatar id={patient.id} fn={patient.firstName} ln={patient.lastName} size={32} />
                     <div>
-                      <div style={{ fontWeight:600, fontSize:13 }}>{patient.fullName}</div>
-                      <div style={{ fontSize:11, color:'#64748b' }}>DOB {patient.dob}</div>
+                      <div style={{ fontWeight:600, fontSize:13 }}>{fullName(patient)}</div>
+                      <div style={{ fontSize:11, color:'#64748b' }}>DOB {formatDob(patient.dateOfBirth)}</div>
                     </div>
                     <span style={{ color:'#2563eb', marginLeft:'auto' }}><CheckIcon /></span>
                   </div>
@@ -615,19 +547,17 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
           {/* Step 3 — Details: image preview (left) + form (right) */}
           {step === 'rx' && (
             <div className="details-layout">
-              {/* LEFT — prescription preview */}
               <div className="details-preview">
                 <PrescriptionPreview file={file} onReupload={() => setStep('file')} />
               </div>
 
-              {/* RIGHT — scrollable form */}
               <div className="details-form">
                 {patient && (
                   <div className="selected-patient-chip">
                     <Avatar id={patient.id} fn={patient.firstName} ln={patient.lastName} size={32} />
                     <div>
-                      <div style={{ fontWeight:600, fontSize:13 }}>{patient.fullName}</div>
-                      <div style={{ fontSize:11, color:'#64748b' }}>DOB {patient.dob}</div>
+                      <div style={{ fontWeight:600, fontSize:13 }}>{fullName(patient)}</div>
+                      <div style={{ fontSize:11, color:'#64748b' }}>DOB {formatDob(patient.dateOfBirth)}</div>
                     </div>
                     {!preselectedPatient && (
                       <button className="chip-change" onClick={() => setStep('patient')}>Change</button>
@@ -635,76 +565,61 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
                   </div>
                 )}
 
-                {/* Autofill / manual entry toggle */}
                 <div className="entry-mode-row">
                   <span className="entry-mode-label">Medication details</span>
-                  <div style={{ display:'flex', gap:8 }}>
-                    <button className="btn-autofill" onClick={handleAutofill} disabled={!file || autofilling}
-                      title={file ? 'Extract fields from the image using AI' : 'Upload an image first to autofill'}>
-                      {autofilling ? <><Spinner small /> Reading image…</> : <>✨ Autofill from image</>}
-                    </button>
-                    <button className="btn-autofill" onClick={handleReview}
-                      disabled={!file || reviewing || !drugName.trim()}
-                      title={!file ? 'Upload an image first' : !drugName.trim() ? 'Enter at least the drug name' : 'Verify the entered details against the image'}>
-                      {reviewing ? <><Spinner small /> Verifying…</> : <>🛡️ Verify against image</>}
-                    </button>
-                  </div>
+                  <button className="btn-autofill" onClick={handleAutofill} disabled={!file || autofilling}
+                    title={file ? 'Extract fields from the image using AI' : 'Upload an image first to autofill'}>
+                    {autofilling ? <><Spinner small /> Reading image…</> : <>✨ Autofill from image</>}
+                  </button>
                 </div>
                 {autofillNote && <div className="autofill-note">{autofillNote}</div>}
-                {reviewNote && <div className="autofill-note">{reviewNote}</div>}
-                {reviewResult && reviewResult.flags.length > 0 && (
-                  <ul className="review-flags">
-                    {reviewResult.flags.map((f: Flag) => (
-                      <li key={f.field} className="review-flag">
-                        <span className="review-flag-field">{f.field}</span>
-                        <span className="review-flag-desc">{f.description}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
 
                 <div className="create-form-grid" style={{ marginTop: 12 }}>
                   <div className="field-group" style={{ gridColumn:'1 / -1' }}>
-                    <label className="field-label">Drug Name <span className="req">*</span></label>
-                    <input className="field-input" type="text" placeholder="e.g. Lisinopril 10mg"
+                    <label className="field-label">Drug Name & Strength <span className="req">*</span></label>
+                    <input className="field-input" type="text" placeholder="e.g. Lisinopril 10 mg tablet" maxLength={200}
                       value={drugName} onChange={e => setDrugName(e.target.value)} />
                   </div>
                   <div className="field-group" style={{ gridColumn:'1 / -1' }}>
                     <label className="field-label">Directions <span className="req">*</span></label>
-                    <textarea className="field-input field-textarea" rows={2}
+                    <textarea className="field-input field-textarea" rows={2} maxLength={500}
                       placeholder="e.g. Take 1 tablet by mouth once daily"
                       value={directions} onChange={e => setDirections(e.target.value)} />
                   </div>
                   <div className="field-group">
                     <label className="field-label">Quantity <span className="req">*</span></label>
-                    <input className="field-input" type="number" min="0" inputMode="numeric"
-                      placeholder="e.g. 30"
-                      value={quantity} onChange={e => setQuantity(e.target.value)} />
+                    <input className="field-input" type="number" min="1" max="9999" inputMode="numeric"
+                      placeholder="e.g. 30" value={quantity} onChange={e => setQuantity(e.target.value)} />
                   </div>
                   <div className="field-group">
-                    <label className="field-label">Day Supply <span className="req">*</span></label>
-                    <input className="field-input" type="number" min="0" inputMode="numeric"
-                      placeholder="e.g. 30"
-                      value={daySupply} onChange={e => setDaySupply(e.target.value)} />
+                    <label className="field-label">Day Supply</label>
+                    <input className="field-input" type="number" min="1" max="365" inputMode="numeric"
+                      placeholder="e.g. 30" value={daySupply} onChange={e => setDaySupply(e.target.value)} />
                   </div>
                   <div className="field-group">
-                    <label className="field-label">Prescriber Name <span className="req">*</span></label>
-                    <input className="field-input" type="text" placeholder="e.g. Dr. Jane Doe"
+                    <label className="field-label">Refills</label>
+                    <input className="field-input" type="number" min="0" max="99" inputMode="numeric"
+                      placeholder="e.g. 2" value={refills} onChange={e => setRefills(e.target.value)} />
+                  </div>
+                  <div className="field-group">
+                    <label className="field-label">Prescriber NPI</label>
+                    <input className="field-input" type="text" placeholder="10 digits"
+                      value={npi} onChange={e => setNpi(e.target.value)} />
+                  </div>
+                  <div className="field-group" style={{ gridColumn:'1 / -1' }}>
+                    <label className="field-label">Prescriber Name</label>
+                    <input className="field-input" type="text" placeholder="e.g. Dr. Alan Reyes" maxLength={100}
                       value={prescriberName} onChange={e => setPrescriberName(e.target.value)} />
                   </div>
-                  <div className="field-group">
-                    <label className="field-label">Prescriber NPI/DEA <span className="req">*</span></label>
-                    <input className="field-input" type="text" placeholder="e.g. 1234567890"
-                      value={npiDea} onChange={e => setNpiDea(e.target.value)} />
-                  </div>
                 </div>
+                {guardError && <div className="autofill-note">⚠️ {guardError}</div>}
 
                 <div className="modal-footer" style={{ marginTop: 16 }}>
-                  <button className="btn-cancel" onClick={() => setStep('patient')} disabled={saving}>Back</button>
+                  <button className="btn-cancel" onClick={() => setStep(preselectedPatient ? 'file' : 'patient')} disabled={saving}>Back</button>
                   <button className="btn-primary"
                     disabled={!rxValid || saving || !patient}
                     onClick={handleCreate}>
-                    {saving ? <><Spinner small /> Saving…</> : <>Start Review <ChevronRight /></>}
+                    {saving ? <><Spinner small /> Submitting…</> : <>Submit for Review <ChevronRight /></>}
                   </button>
                 </div>
               </div>
@@ -717,47 +632,82 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Prescription table (Dashboard, Prescriptions, Reviews)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function PrescriptionTable({ rows, onOpen, empty }: { rows: ApiPrescription[]; onOpen: (rx: ApiPrescription) => void; empty: string }) {
+  return (
+    <div className="table-wrapper">
+      <table aria-label="Prescriptions table">
+        <thead>
+          <tr>
+            <th scope="col">Time</th>
+            <th scope="col">Rx ID</th>
+            <th scope="col">Patient</th>
+            <th scope="col">Medication</th>
+            <th scope="col">Status</th>
+            <th scope="col">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 && (
+            <tr><td colSpan={6} style={{ textAlign:'center', color:'#94a3b8', padding:24 }}>{empty}</td></tr>
+          )}
+          {rows.map(rx => (
+            <tr key={rx.id} tabIndex={0} className="tr--clickable" onClick={() => onOpen(rx)}
+              onKeyDown={e => e.key === 'Enter' && onOpen(rx)}>
+              <td className="td-time">{rxTime(rx)}</td>
+              <td className="td-rxid">{rx.externalRef}</td>
+              <td>
+                <div className="patient-name">{rx.patient ? fullName(rx.patient) : 'No patient linked'}</div>
+                {rx.patient && <div className="patient-dob">DOB {formatDob(rx.patient.dateOfBirth)}</div>}
+              </td>
+              <td style={{ fontSize:13 }}>
+                <div style={{ fontWeight:500 }}>{rxMedication(rx)}</div>
+                {rx.fileName && <div style={{ fontSize:11, color:'#94a3b8' }}>{rx.fileName}</div>}
+              </td>
+              <td><StatusCell rx={rx} /></td>
+              <td>
+                <button className="btn-cancel" style={{ padding:'4px 10px', fontSize:12 }} onClick={e => { e.stopPropagation(); onOpen(rx) }}>
+                  {rx.status === 'MANUAL_REVIEW_NEEDED' && rx.reviewStatus === 'PENDING_REVIEW' ? 'Review' : 'Open'}
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function matchesQuery(rx: ApiPrescription, q: string): boolean {
+  const s = q.trim().toLowerCase()
+  if (!s) return true
+  return (rx.patient ? fullName(rx.patient).toLowerCase().includes(s) : false)
+    || rx.externalRef.toLowerCase().includes(s)
+    || rx.medicationSummary.some(m => m.toLowerCase().includes(s))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Dashboard
 // ─────────────────────────────────────────────────────────────────────────────
 
-function Dashboard({ onUpload, onNavigate }: { onUpload: () => void; onNavigate: (nav: string) => void }) {
-  // All prescription + stats data now comes from the backend-driven hook.
-  const { data: rxList, stats, loading, error, refresh, setStatus } = usePrescriptions()
+function Dashboard({ rxList, stats, loading, error, onUpload, onOpen, onNavigate }: {
+  rxList: ApiPrescription[]; stats: ReturnType<typeof usePrescriptions>['stats']; loading: boolean; error: string | null
+  onUpload: () => void; onOpen: (rx: ApiPrescription) => void; onNavigate: (nav: string) => void
+}) {
   const [globalQ, setGlobalQ]     = useState('')
   const [statusFilter, setStatusFilter] = useState<PrescriptionStatus | ''>('')
   const [showSignal, setShowSignal] = useState<number | null>(null)
 
-  // Client-side narrowing on top of whatever the backend returned.
-  // Status filter (from stat cards) and text search (from the box) are independent.
-  const filtered = rxList.filter(r => {
-    const matchesStatus = !statusFilter || r.status === statusFilter
-    const q = globalQ.trim().toLowerCase()
-    const matchesText = !q
-      || r.patientName.toLowerCase().includes(q)
-      || r.rxId.toLowerCase().includes(q)
-      || r.medication.toLowerCase().includes(q)
-    return matchesStatus && matchesText
-  })
-
-  // Pure client-side text filter so it composes with the status filter.
-  // (rxList already holds the latest 50 from the backend.)
-  function handleGlobalSearch(q: string) {
-    setGlobalQ(q)
-  }
-
-  async function handleStatusChange(rx: ApiPrescription, newStatus: PrescriptionStatus) {
-    try {
-      await setStatus(rx.id, newStatus)
-    } catch (e: unknown) {
-      alert('Status update failed: ' + (e instanceof Error ? e.message : e))
-    }
-  }
+  const filtered = rxList.filter(r => (!statusFilter || r.status === statusFilter) && matchesQuery(r, globalQ))
 
   const signals = [
-    { icon: '🚨', cls: 'red',    title: 'Drug interaction detected', desc: 'Checks for interactions between new medications and existing therapies. Click to filter prescriptions flagged for this issue.' },
-    { icon: '⚠️', cls: 'orange', title: 'Allergy mismatch',          desc: 'Identifies potential conflicts with known patient allergies.' },
-    { icon: '📊', cls: 'blue',   title: 'Dose looks unusual',        desc: "Flags doses outside typical ranges for the patient's age, condition, or renal function." },
-    { icon: '📄', cls: 'purple', title: 'Missing patient context',   desc: 'Alerts when key information (indication, labs, medical history) is missing.' },
+    { icon: '🚨', cls: 'red',    title: 'Drug interaction detected', desc: 'Checks the new prescription against the other drugs on it and the patient’s active medications (curated interaction table, with cited references).' },
+    { icon: '⚠️', cls: 'orange', title: 'Allergy mismatch',          desc: 'Matches recorded allergies, including cross-reactive classes (e.g. penicillin → cephalosporin), against the prescribed drug.' },
+    { icon: '📊', cls: 'blue',   title: 'Dose looks unusual',        desc: 'Computes the daily dose from strength × units × frequency and flags anything above labeled maximums.' },
+    { icon: '📄', cls: 'purple', title: 'Missing patient context',   desc: 'Alerts when allergies are unverified, no patient is linked, or key prescription fields are missing.' },
+    { icon: '⌨️', cls: 'red',    title: 'Data entry mismatch',       desc: 'Compares what the technician typed with what is written on the script — wrong patient, drug, strength, quantity or directions.' },
   ]
 
   if (loading) return (
@@ -773,21 +723,20 @@ function Dashboard({ onUpload, onNavigate }: { onUpload: () => void; onNavigate:
 
       {error && <ApiErrorBanner message={error} />}
 
-      {/* Stat cards */}
       {stats && (
         <div className="stat-cards" role="region" aria-label="Today's statistics">
           {[
-            { label: 'Reviewed Today',       value: stats.reviewed,   cls: 'green',  icon: '📋', status: 'reviewed'   },
-            { label: 'Manual Review Needed', value: stats.manual,     cls: 'orange', icon: '⚠️', status: 'manual'     },
-            { label: 'Cleared / No Action',  value: stats.cleared,    cls: 'blue',   icon: '✅', status: 'cleared'    },
-            { label: 'Processing',           value: stats.processing, cls: 'purple', icon: '⏳', status: 'processing' },
+            { label: 'Manual Review Needed', value: stats.manualReviewNeeded, cls: 'orange', icon: '⚠️', status: 'MANUAL_REVIEW_NEEDED' },
+            { label: 'No Flags Detected',    value: stats.noFlagsDetected,    cls: 'blue',   icon: '✅', status: 'NO_FLAGS_DETECTED'    },
+            { label: 'Processing',           value: stats.processing,         cls: 'purple', icon: '⏳', status: 'PROCESSING'           },
+            { label: 'Reviewed Today',       value: stats.reviewedToday,      cls: 'green',  icon: '📋', status: ''                     },
           ].map(card => (
-            <div key={card.status} className="stat-card stat-card--clickable"
+            <div key={card.label} className="stat-card stat-card--clickable"
               role="button" tabIndex={0}
-              title={`Filter by: ${card.label}`}
-              onClick={() => setStatusFilter(prev => prev === card.status ? '' : card.status as PrescriptionStatus)}
-              onKeyDown={e => e.key === 'Enter' && setStatusFilter(prev => prev === card.status ? '' : card.status as PrescriptionStatus)}
-              style={{ outline: statusFilter === card.status ? '2px solid #2563eb' : undefined }}
+              title={card.status ? `Filter by: ${card.label}` : 'Open Reviews'}
+              onClick={() => card.status ? setStatusFilter(prev => prev === card.status ? '' : card.status as PrescriptionStatus) : onNavigate('reviews')}
+              onKeyDown={e => e.key === 'Enter' && (card.status ? setStatusFilter(prev => prev === card.status ? '' : card.status as PrescriptionStatus) : onNavigate('reviews'))}
+              style={{ outline: card.status && statusFilter === card.status ? '2px solid #2563eb' : undefined }}
             >
               <div className={`stat-icon ${card.cls}`}>{card.icon}</div>
               <div className="stat-info">
@@ -799,14 +748,11 @@ function Dashboard({ onUpload, onNavigate }: { onUpload: () => void; onNavigate:
         </div>
       )}
 
-      {/* Search bar for table */}
       <div className="table-search-row">
         <div className="search-bar" style={{ width: 320 }}>
           <SearchIcon />
           <input type="search" placeholder="Filter by patient, Rx ID, or medication…"
-            value={globalQ}
-            onChange={e => handleGlobalSearch(e.target.value)}
-            aria-label="Filter prescriptions" />
+            value={globalQ} onChange={e => setGlobalQ(e.target.value)} aria-label="Filter prescriptions" />
         </div>
         {statusFilter && (
           <span className="active-filter-pill">
@@ -816,14 +762,13 @@ function Dashboard({ onUpload, onNavigate }: { onUpload: () => void; onNavigate:
         )}
         {(globalQ || statusFilter) && (
           <button className="btn-cancel" style={{ padding:'6px 12px', fontSize:12 }}
-            onClick={() => { setGlobalQ(''); setStatusFilter(''); refresh() }}>
+            onClick={() => { setGlobalQ(''); setStatusFilter('') }}>
             Clear filter
           </button>
         )}
       </div>
 
       <div className="dashboard-grid">
-        {/* Prescriptions table */}
         <div className="card">
           <div className="card-header">
             <div>
@@ -838,77 +783,9 @@ function Dashboard({ onUpload, onNavigate }: { onUpload: () => void; onNavigate:
               <UploadCloudIcon /> Upload Prescription
             </button>
           </div>
-          <div className="table-wrapper">
-            <table aria-label="Prescriptions table">
-              <thead>
-                <tr>
-                  <th scope="col">Time</th>
-                  <th scope="col">Rx ID</th>
-                  <th scope="col">Patient</th>
-                  <th scope="col">Medication</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.length === 0 && (
-                  <tr><td colSpan={6} style={{ textAlign:'center', color:'#94a3b8', padding:24 }}>
-                    No prescriptions found
-                  </td></tr>
-                )}
-                {filtered.map(rx => {
-                  const t = rx.createdAt ? new Date(rx.createdAt) : null
-                  const time = t ? t.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '—'
-                  return (
-                    <tr key={rx.id} tabIndex={0}>
-                      <td className="td-time">{time}</td>
-                      <td className="td-rxid">{rx.rxId}</td>
-                      <td>
-                        <div className="patient-name">{rx.patientName}</div>
-                        <div className="patient-dob">DOB {rx.patientDob}</div>
-                      </td>
-                      <td style={{ fontSize:13 }}>
-                        <div style={{ fontWeight:500 }}>{rx.medication}</div>
-                        {rx.dosage && <div style={{ fontSize:11, color:'#94a3b8' }}>{rx.dosage}</div>}
-                      </td>
-                      <td>
-                        <Badge status={rx.status} />
-                        {rx.substatus && <div style={{ fontSize:11, color:'#94a3b8', marginTop:3 }}>{rx.substatus}</div>}
-                      </td>
-                      <td>
-                        <div className="rx-actions">
-                          {rx.status !== 'reviewed' && (
-                            <button className="rx-action-btn rx-action-btn--approve"
-                              title="Mark as Reviewed"
-                              onClick={() => handleStatusChange(rx, 'reviewed')}>
-                              <CheckIcon />
-                            </button>
-                          )}
-                          {rx.status !== 'cleared' && (
-                            <button className="rx-action-btn rx-action-btn--clear"
-                              title="Clear / No Action"
-                              onClick={() => handleStatusChange(rx, 'cleared')}>
-                              ✓
-                            </button>
-                          )}
-                          {rx.status !== 'manual' && (
-                            <button className="rx-action-btn rx-action-btn--flag"
-                              title="Flag for Manual Review"
-                              onClick={() => handleStatusChange(rx, 'manual')}>
-                              ⚑
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+          <PrescriptionTable rows={filtered.slice(0, 50)} onOpen={onOpen} empty="No prescriptions found — upload one to start." />
         </div>
 
-        {/* Signals panel */}
         <aside className="signals-panel">
           <div className="signals-card">
             <div className="signals-header">
@@ -918,10 +795,6 @@ function Dashboard({ onUpload, onNavigate }: { onUpload: () => void; onNavigate:
                 </svg>
                 Review Signals
               </div>
-              <button className="how-it-works"
-                onClick={() => alert('Review Signals analyze each prescription using multiple clinical checks before it reaches the pharmacist.')}>
-                How it works
-              </button>
             </div>
 
             {signals.map((s, i) => (
@@ -947,7 +820,7 @@ function Dashboard({ onUpload, onNavigate }: { onUpload: () => void; onNavigate:
           <div className="safe-care">
             <div className="icon">💡</div>
             <h3>Built for safer care</h3>
-            <p>Combining AI with clinical expertise to catch potential issues early — before they reach the patient.</p>
+            <p>AutoScript routes prescriptions to the pharmacist — it never approves them. "No flags" only means nothing was found within the checked criteria.</p>
             <button className="btn-primary" style={{ marginTop:12, width:'100%', justifyContent:'center' }}
               onClick={() => onNavigate('prescriptions')}>
               View all prescriptions <ChevronRight />
@@ -963,43 +836,15 @@ function Dashboard({ onUpload, onNavigate }: { onUpload: () => void; onNavigate:
 // Prescriptions page
 // ─────────────────────────────────────────────────────────────────────────────
 
-function PrescriptionsPage({ onUpload }: { onUpload: () => void }) {
-  const [rxList,   setRxList]   = useState<ApiPrescription[]>([])
-  const [loading,  setLoading]  = useState(true)
-  const [error,    setError]    = useState<string | null>(null)
-  const [query,    setQuery]    = useState('')
-  const [statusF,  setStatusF]  = useState('')
-  const [selected, setSelected] = useState<ApiPrescription | null>(null)
+function PrescriptionsPage({ rxList, loading, error, initialQuery, onUpload, onOpen }: {
+  rxList: ApiPrescription[]; loading: boolean; error: string | null; initialQuery: string
+  onUpload: () => void; onOpen: (rx: ApiPrescription) => void
+}) {
+  const [query,   setQuery]   = useState(initialQuery)
+  const [statusF, setStatusF] = useState<PrescriptionStatus | ''>('')
+  useEffect(() => { setQuery(initialQuery) }, [initialQuery])
 
-  const load = useCallback(async () => {
-    setLoading(true); setError(null)
-    try {
-      const data = await apiFetch<ApiPrescription[]>('/prescriptions')
-      setRxList(data)
-    } catch (e: unknown) { setError(e instanceof Error ? e.message : 'Failed') }
-    finally { setLoading(false) }
-  }, [])
-
-  useEffect(() => { load() }, [load])
-
-  const filtered = rxList.filter(r => {
-    const matchQ = !query.trim()
-      || r.patientName.toLowerCase().includes(query.toLowerCase())
-      || r.rxId.toLowerCase().includes(query.toLowerCase())
-      || r.medication.toLowerCase().includes(query.toLowerCase())
-    const matchS = !statusF || r.status === statusF
-    return matchQ && matchS
-  })
-
-  async function changeStatus(rx: ApiPrescription, s: string) {
-    try {
-      const updated = await apiFetch<ApiPrescription>(`/prescriptions/${rx.id}/status`, {
-        method: 'PATCH', body: JSON.stringify({ status: s, substatus: null }),
-      })
-      setRxList(prev => prev.map(r => r.id === updated.id ? updated : r))
-      if (selected?.id === rx.id) setSelected(updated)
-    } catch (e: unknown) { alert('Update failed: ' + (e instanceof Error ? e.message : e)) }
-  }
+  const filtered = rxList.filter(r => matchesQuery(r, query) && (!statusF || r.status === statusF))
 
   return (
     <div style={{ maxWidth: 1100 }}>
@@ -1013,18 +858,15 @@ function PrescriptionsPage({ onUpload }: { onUpload: () => void }) {
 
       {error && <ApiErrorBanner message={error} />}
 
-      {/* Filters */}
       <div className="table-search-row" style={{ marginBottom: 16 }}>
         <div className="search-bar" style={{ width: 300 }}>
           <SearchIcon />
           <input type="search" placeholder="Search patient, Rx ID, medication…"
             value={query} onChange={e => setQuery(e.target.value)} />
         </div>
-        <div style={{ display:'flex', gap:6 }}>
-          {['','processing','manual','reviewed','cleared'].map(s => (
-            <button key={s}
-              className={`filter-pill${statusF === s ? ' active' : ''}`}
-              onClick={() => setStatusF(s)}>
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+          {(['', 'PROCESSING', 'MANUAL_REVIEW_NEEDED', 'NO_FLAGS_DETECTED', 'FAILED'] as const).map(s => (
+            <button key={s} className={`filter-pill${statusF === s ? ' active' : ''}`} onClick={() => setStatusF(s)}>
               {s === '' ? 'All' : statusMeta(s).label}
             </button>
           ))}
@@ -1033,81 +875,118 @@ function PrescriptionsPage({ onUpload }: { onUpload: () => void }) {
 
       {loading
         ? <div className="loading-page"><Spinner /> Loading…</div>
-        : (
-        <div className="card">
-          <div className="table-wrapper">
-            <table>
-              <thead>
-                <tr>
-                  <th>Time</th><th>Rx ID</th><th>Patient</th>
-                  <th>Medication</th><th>Prescriber</th><th>Status</th><th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.length === 0 && (
-                  <tr><td colSpan={7} style={{ textAlign:'center', color:'#94a3b8', padding:24 }}>
-                    No prescriptions match your filters
-                  </td></tr>
-                )}
-                {filtered.map(rx => {
-                  const t = rx.createdAt ? new Date(rx.createdAt) : null
-                  return (
-                    <tr key={rx.id} tabIndex={0} className={selected?.id === rx.id ? 'tr--selected' : ''}
-                      onClick={() => setSelected(rx === selected ? null : rx)}>
-                      <td className="td-time">{t ? t.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '—'}</td>
-                      <td className="td-rxid">{rx.rxId}</td>
-                      <td>
-                        <div className="patient-name">{rx.patientName}</div>
-                        <div className="patient-dob">DOB {rx.patientDob}</div>
-                      </td>
-                      <td style={{ fontSize:13 }}>
-                        <div style={{ fontWeight:500 }}>{rx.medication}</div>
-                        {rx.dosage && <div style={{ fontSize:11, color:'#94a3b8' }}>{rx.dosage}</div>}
-                      </td>
-                      <td style={{ fontSize:12, color:'#64748b' }}>{rx.prescriber ?? '—'}</td>
-                      <td><Badge status={rx.status} /></td>
-                      <td onClick={e => e.stopPropagation()}>
-                        <div className="rx-actions">
-                          {rx.status !== 'reviewed' && <button className="rx-action-btn rx-action-btn--approve" title="Mark Reviewed" onClick={() => changeStatus(rx,'reviewed')}><CheckIcon /></button>}
-                          {rx.status !== 'cleared'  && <button className="rx-action-btn rx-action-btn--clear"   title="Clear"         onClick={() => changeStatus(rx,'cleared')}>✓</button>}
-                          {rx.status !== 'manual'   && <button className="rx-action-btn rx-action-btn--flag"    title="Flag Manual"   onClick={() => changeStatus(rx,'manual')}>⚑</button>}
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+        : <div className="card"><PrescriptionTable rows={filtered} onOpen={onOpen} empty="No prescriptions match your filters" /></div>}
+    </div>
+  )
+}
 
-      {/* Detail drawer */}
-      {selected && (
-        <div className="detail-drawer">
-          <div className="detail-drawer-header">
-            <h3>{selected.rxId} — {selected.patientName}</h3>
-            <button className="modal-close" onClick={() => setSelected(null)}><XIcon /></button>
-          </div>
-          <div className="detail-grid">
-            <div className="detail-item"><span className="detail-label">Patient</span><span>{selected.patientName}</span></div>
-            <div className="detail-item"><span className="detail-label">DOB</span><span>{selected.patientDob}</span></div>
-            <div className="detail-item"><span className="detail-label">Medication</span><span>{selected.medication}</span></div>
-            <div className="detail-item"><span className="detail-label">Dosage</span><span>{selected.dosage ?? '—'}</span></div>
-            <div className="detail-item"><span className="detail-label">Prescriber</span><span>{selected.prescriber ?? '—'}</span></div>
-            <div className="detail-item"><span className="detail-label">Status</span><span><Badge status={selected.status} /></span></div>
-            <div className="detail-item" style={{ gridColumn:'1/-1' }}>
-              <span className="detail-label">Instructions</span>
-              <span>{selected.instructions ?? '—'}</span>
-            </div>
-          </div>
-          <div style={{ display:'flex', gap:8, marginTop:16 }}>
-            {selected.status !== 'reviewed' && <button className="btn-primary" onClick={() => changeStatus(selected,'reviewed')}><CheckIcon /> Mark Reviewed</button>}
-            {selected.status !== 'cleared'  && <button className="btn-cancel"  onClick={() => changeStatus(selected,'cleared')}>Clear</button>}
-            {selected.status !== 'manual'   && <button className="btn-cancel"  onClick={() => changeStatus(selected,'manual')}>⚑ Flag for Review</button>}
-          </div>
+// ─────────────────────────────────────────────────────────────────────────────
+// Reviews page — the pharmacist's work queue
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ReviewsPage({ rxList, loading, onOpen }: { rxList: ApiPrescription[]; loading: boolean; onOpen: (rx: ApiPrescription) => void }) {
+  const open = rxList
+    .filter(r => r.status === 'MANUAL_REVIEW_NEEDED' && !['REVIEWED', 'INTERVENTION_DOCUMENTED'].includes(r.reviewStatus))
+    .sort((a, b) => severityRank(b.highestSeverity) - severityRank(a.highestSeverity) || a.createdAt.localeCompare(b.createdAt))
+  const done = rxList.filter(r => r.reviewedAt).sort((a, b) => (b.reviewedAt ?? '').localeCompare(a.reviewedAt ?? ''))
+  const failed = rxList.filter(r => r.status === 'FAILED')
+
+  if (loading) return <div className="loading-page"><Spinner /> Loading…</div>
+  return (
+    <div style={{ maxWidth: 1100 }}>
+      <div className="page-header">
+        <h1>Reviews</h1>
+        <p>Prescriptions routed to the pharmacist, most severe first</p>
+      </div>
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-header"><div><h2>Needs pharmacist review</h2><p>{open.length} open</p></div></div>
+        <PrescriptionTable rows={open} onOpen={onOpen} empty="Nothing waiting for review." />
+      </div>
+      {failed.length > 0 && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="card-header"><div><h2>Screening failed</h2><p>Open one to see the reason and retry</p></div></div>
+          <PrescriptionTable rows={failed} onOpen={onOpen} empty="" />
         </div>
       )}
+      <div className="card">
+        <div className="card-header"><div><h2>Completed reviews</h2><p>{done.length} reviewed</p></div></div>
+        <PrescriptionTable rows={done} onOpen={onOpen} empty="No completed reviews yet." />
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Analytics page
+// ─────────────────────────────────────────────────────────────────────────────
+
+function AnalyticsPage({ rxList, stats }: { rxList: ApiPrescription[]; stats: ReturnType<typeof usePrescriptions>['stats'] }) {
+  const bySeverity = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const r of rxList) if (r.highestSeverity) m.set(r.highestSeverity, (m.get(r.highestSeverity) ?? 0) + 1)
+    return (['CRITICAL', 'HIGH', 'MODERATE', 'LOW', 'INFO'] as const).map(s => [s, m.get(s) ?? 0] as const)
+  }, [rxList])
+  const max = Math.max(1, ...bySeverity.map(([, n]) => n))
+  const totalFindings = rxList.reduce((n, r) => n + r.findingCount, 0)
+
+  return (
+    <div style={{ maxWidth: 1100 }}>
+      <div className="page-header"><h1>Analytics</h1><p>Screening outcomes across all prescriptions</p></div>
+      {stats && (
+        <div className="stat-cards">
+          {[
+            { label: 'Total prescriptions', value: stats.total, cls: 'blue', icon: '📋' },
+            { label: 'Findings raised', value: totalFindings, cls: 'orange', icon: '🔎' },
+            { label: 'Interventions required', value: stats.interventionRequired, cls: 'purple', icon: '🛠️' },
+            { label: 'Failed screenings', value: stats.failed, cls: 'orange', icon: '⚠️' },
+          ].map(c => (
+            <div key={c.label} className="stat-card">
+              <div className={`stat-icon ${c.cls}`}>{c.icon}</div>
+              <div className="stat-info"><div className="label">{c.label}</div><div className="value">{c.value}</div></div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="card" style={{ padding: 20 }}>
+        <h2 style={{ fontSize: 15, marginBottom: 12 }}>Highest severity per prescription</h2>
+        {bySeverity.map(([sev, n]) => (
+          <div key={sev} className="bar-row">
+            <span className="bar-label"><SeverityChip severity={sev} /></span>
+            <div className="bar-track"><div className={`bar-fill sev-bg-${sev.toLowerCase()}`} style={{ width: `${(n / max) * 100}%` }} /></div>
+            <span className="bar-value">{n}</span>
+          </div>
+        ))}
+        {stats && (
+          <p className="muted" style={{ marginTop: 12 }}>
+            Review status: {stats.pendingReview} pending · {stats.infoRequested} info requested · {stats.interventionDocumented} interventions documented · {stats.reviewed} reviewed
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Settings page — system status
+// ─────────────────────────────────────────────────────────────────────────────
+
+function SettingsPage() {
+  const [health, setHealth] = useState<{ ok: boolean; engine: boolean } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    fetch(`${API_BASE}/health`).then(r => r.json()).then(setHealth).catch(() => setError('API unreachable'))
+  }, [])
+  return (
+    <div style={{ maxWidth: 700 }}>
+      <div className="page-header"><h1>Settings</h1><p>System status</p></div>
+      <div className="card" style={{ padding: 20 }}>
+        <div className="detail-item"><span className="detail-label">API</span><span>{API_BASE} — {error ?? (health?.ok ? '✅ online' : 'checking…')}</span></div>
+        <div className="detail-item" style={{ marginTop: 8 }}><span className="detail-label">RX Engine</span><span>{health ? (health.engine ? '✅ online' : '❌ offline — start it with pnpm dev') : '—'}</span></div>
+        <p className="muted" style={{ marginTop: 16 }}>
+          AI extraction and analysis use the OpenRouter key in <code>autoscript/.env</code> (<code>LLM_API_KEY</code>).
+          Without it, uploads fail with an explicit error instead of guessing.
+        </p>
+      </div>
     </div>
   )
 }
@@ -1127,24 +1006,21 @@ function PatientLookup({ onUploadForPatient }: { onUploadForPatient: (p: ApiPati
   const [showCreate,setShowCreate]= useState(false)
   const [creating,  setCreating]  = useState(false)
   const [createOk,  setCreateOk]  = useState<string | null>(null)
-  const [form, setForm] = useState({ firstName:'', lastName:'', dob:'', phone:'', email:'', address:'', notes:'' })
+  const [form, setForm] = useState<NewPatientForm>(EMPTY_PATIENT)
 
   const hasInput = firstName || lastName || dob || phone
 
-  async function handleSearch(e: React.FormEvent) {
-    e.preventDefault()
-    if (!hasInput) return
+  async function runSearch() {
     setLoading(true); setError(null); setShowCreate(false); setCreateOk(null)
     try {
-      const params = new URLSearchParams()
-      if (firstName) params.set('firstName', firstName)
-      if (lastName)  params.set('lastName',  lastName)
-      if (dob)       params.set('dob',       dob)
-      if (phone)     params.set('phone',     phone)
-      const data = await apiFetch<ApiPatient[]>(`/patients?${params}`)
-      setResults(data)
+      setResults(await patientsApi.search({ firstName, lastName, dob, phone }))
     } catch (e: unknown) { setError(e instanceof Error ? e.message : 'Search failed') }
     finally { setLoading(false) }
+  }
+
+  function handleSearch(e: React.FormEvent) {
+    e.preventDefault()
+    if (hasInput) runSearch()
   }
 
   function handleClear() {
@@ -1154,37 +1030,23 @@ function PatientLookup({ onUploadForPatient }: { onUploadForPatient: (p: ApiPati
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault()
-    if (!form.firstName.trim() || !form.lastName.trim() || !form.dob.trim()) return
+    const body = toCreatePatient(form)
+    if (typeof body === 'string') { setError(body); return }
     setCreating(true); setError(null)
     try {
-      const created = await apiFetch<ApiPatient>('/patients', {
-        method: 'POST',
-        body: JSON.stringify({
-          firstName: form.firstName.trim(),
-          lastName:  form.lastName.trim(),
-          dob:       form.dob.trim(),
-          phone:     form.phone.trim()   || null,
-          email:     form.email.trim()   || null,
-          address:   form.address.trim() || null,
-          notes:     form.notes.trim()   || null,
-        }),
-      })
-      setCreateOk(`${created.fullName} created successfully!`)
+      const created = await patientsApi.create(body)
+      setCreateOk(`${fullName(created)} created successfully!`)
       setShowCreate(false)
-      setForm({ firstName:'', lastName:'', dob:'', phone:'', email:'', address:'', notes:'' })
-      // refresh results if we had a search
-      if (results !== null) handleSearch({ preventDefault: () => {} } as React.FormEvent)
-    } catch (e: unknown) { setError(e instanceof Error ? e.message : 'Create failed') }
+      setForm(EMPTY_PATIENT)
+      setResults([created])
+    } catch (e: unknown) { setError(e instanceof ApiError ? e.message : 'Create failed') }
     finally { setCreating(false) }
   }
 
-  // Count shared phones in results
   const phoneCounts = new Map<string, number>()
-  if (results) {
-    for (const p of results) {
-      const k = (p.phone ?? '').replace(/[\s\-()+]/g, '')
-      if (k) phoneCounts.set(k, (phoneCounts.get(k) ?? 0) + 1)
-    }
+  for (const p of results ?? []) {
+    const k = normalizePhone(p.phone)
+    if (k) phoneCounts.set(k, (phoneCounts.get(k) ?? 0) + 1)
   }
 
   return (
@@ -1194,7 +1056,6 @@ function PatientLookup({ onUploadForPatient }: { onUploadForPatient: (p: ApiPati
         <p>Search by any combination of name, date of birth, or phone number</p>
       </div>
 
-      {/* Search card */}
       <div className="lookup-card">
         <div className="lookup-card-header">
           <div className="lookup-card-title"><SearchIcon size={18} /> Search Criteria</div>
@@ -1227,11 +1088,10 @@ function PatientLookup({ onUploadForPatient }: { onUploadForPatient: (p: ApiPati
       {error     && <ApiErrorBanner message={error} />}
       {createOk  && <div className="create-success"><div className="create-success-icon">✅</div><div className="create-success-text"><strong>{createOk}</strong></div></div>}
 
-      {/* Tips */}
       {results === null && !showCreate && (
         <div className="lookup-tips">
           {[
-            { icon:'💡', title:'Partial search works',        text:'Type "Kim" in Last Name or "04/12" in DOB to find partial matches.' },
+            { icon:'💡', title:'Partial search works',        text:'Type "Rey" in Last Name or "04/12" in DOB to find partial matches.' },
             { icon:'📞', title:'Shared phone numbers',        text:'A parent may use their number for a child. All matches are shown with a warning.' },
             { icon:'👥', title:'Multiple matches are normal', text:'Common names or shared DOBs return several results. Always confirm with a second field.' },
           ].map(t => (
@@ -1243,7 +1103,6 @@ function PatientLookup({ onUploadForPatient }: { onUploadForPatient: (p: ApiPati
         </div>
       )}
 
-      {/* Results */}
       {results !== null && (
         <div className="lookup-results">
           <div className="results-header">
@@ -1263,18 +1122,17 @@ function PatientLookup({ onUploadForPatient }: { onUploadForPatient: (p: ApiPati
           )}
           <div className="results-grid">
             {results.map(p => {
-              const pk = (p.phone ?? '').replace(/[\s\-()+]/g, '')
+              const pk = normalizePhone(p.phone)
               const shared = pk ? (phoneCounts.get(pk) ?? 1) > 1 : false
               return (
                 <div key={p.id} className={`result-card${shared ? ' result-card--warning' : ''}`}>
                   <div className="result-card-top">
                     <Avatar id={p.id} fn={p.firstName} ln={p.lastName} size={46} />
                     <div className="result-identity">
-                      <div className="result-name">{p.fullName}</div>
-                      <div className="result-meta">DOB {p.dob}</div>
+                      <div className="result-name">{fullName(p)}</div>
+                      <div className="result-meta">DOB {formatDob(p.dateOfBirth)}</div>
                     </div>
-                    <button className="btn-select-patient"
-                      onClick={() => onUploadForPatient(p)}>
+                    <button className="btn-select-patient" onClick={() => onUploadForPatient(p)}>
                       New Rx <ChevronRight />
                     </button>
                   </div>
@@ -1286,17 +1144,6 @@ function PatientLookup({ onUploadForPatient }: { onUploadForPatient: (p: ApiPati
                         {shared && <span className="shared-phone-tag">Shared number</span>}
                       </span>
                     </div>
-                    <div className="result-detail-row">
-                      <span className="detail-label">DOB</span>
-                      <span className="detail-value">{p.dob}</span>
-                    </div>
-                    {p.email && (
-                      <div className="result-detail-row">
-                        <span className="detail-label">Email</span>
-                        <span className="detail-value">{p.email}</span>
-                      </div>
-                    )}
-                    {p.notes && <div className="result-note"><span className="note-icon">ℹ️</span>{p.notes}</div>}
                   </div>
                 </div>
               )
@@ -1305,7 +1152,6 @@ function PatientLookup({ onUploadForPatient }: { onUploadForPatient: (p: ApiPati
         </div>
       )}
 
-      {/* Create new patient */}
       {!showCreate ? (
         <div className="create-cta">
           <div className="create-cta-text">
@@ -1326,30 +1172,8 @@ function PatientLookup({ onUploadForPatient }: { onUploadForPatient: (p: ApiPati
             <button className="modal-close" onClick={() => setShowCreate(false)}><XIcon /></button>
           </div>
           <form onSubmit={handleCreate}>
-            {error && <ApiErrorBanner message={error} />}
-            <div className="create-form-grid">
-              {[
-                { id:'cf-fn', label:'First Name', req:true,  val:form.firstName, key:'firstName' as const, ph:'e.g. Emily',                type:'text'  },
-                { id:'cf-ln', label:'Last Name',  req:true,  val:form.lastName,  key:'lastName'  as const, ph:'e.g. Carter',               type:'text'  },
-                { id:'cf-db', label:'Date of Birth',req:true,val:form.dob,       key:'dob'       as const, ph:'MM/DD/YYYY',                type:'text'  },
-                { id:'cf-ph', label:'Phone',      req:false, val:form.phone,     key:'phone'     as const, ph:'(555) 000-0000',            type:'text'  },
-                { id:'cf-em', label:'Email',      req:false, val:form.email,     key:'email'     as const, ph:'patient@email.com',         type:'email' },
-                { id:'cf-ad', label:'Address',    req:false, val:form.address,   key:'address'   as const, ph:'123 Main St, City, State',  type:'text'  },
-              ].map(f => (
-                <div key={f.id} className="field-group">
-                  <label htmlFor={f.id} className="field-label">{f.label}{f.req && <span className="req"> *</span>}</label>
-                  <input id={f.id} className="field-input" type={f.type} placeholder={f.ph} value={f.val}
-                    onChange={e => setForm(prev => ({ ...prev, [f.key]: e.target.value }))} required={f.req} />
-                </div>
-              ))}
-            </div>
-            <div className="field-group cf-notes" style={{ marginBottom:12 }}>
-              <label htmlFor="cf-notes" className="field-label">Notes</label>
-              <textarea id="cf-notes" className="field-input field-textarea" rows={3}
-                placeholder="Allergies, special considerations, family contacts…"
-                value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} />
-            </div>
-            <p className="req-note"><span className="req">*</span> Required fields</p>
+            <PatientFields form={form} setForm={setForm} />
+            <p className="req-note"><span className="req">*</span> Required fields. Allergies and medications drive the clinical checks.</p>
             <div className="lookup-actions">
               <button type="button" className="btn-cancel" onClick={() => setShowCreate(false)} disabled={creating}>Cancel</button>
               <button type="submit" className="btn-primary"
@@ -1372,18 +1196,20 @@ export default function App() {
   const [activeNav,      setActiveNav]      = useState('dashboard')
   const [showModal,      setShowModal]      = useState(false)
   const [modalPatient,   setModalPatient]   = useState<ApiPatient | null>(null)
-  const [refreshKey,     setRefreshKey]     = useState(0)
+  const [openRxId,       setOpenRxId]       = useState<string | null>(null)
   const [globalSearch,   setGlobalSearch]   = useState('')
+  const [submittedSearch, setSubmittedSearch] = useState('')
   const [notifOpen,      setNotifOpen]      = useState(false)
+  const { data: rxList, stats, loading, error, refresh } = usePrescriptions()
 
   function openUpload(patient?: ApiPatient) {
     setModalPatient(patient ?? null)
     setShowModal(true)
   }
 
-  function handleRxCreated() {
-    setRefreshKey(k => k + 1)
-    setActiveNav('dashboard')
+  function handleRxCreated(id: string) {
+    refresh()
+    setOpenRxId(id)       // follow the screening live
   }
 
   const navItems = [
@@ -1395,20 +1221,21 @@ export default function App() {
     { id: 'settings',      label: 'Settings',      icon: '⚙️' },
   ]
 
-  const notifications = [
-    { icon:'⚠️', text:'RX-78431 — Drug interaction flagged for Michael Chen', time:'2m ago' },
-    { icon:'📋', text:'RX-78430 — Sarah Johnson cleared by Dr. Wright',        time:'14m ago' },
-    { icon:'🔔', text:'RX-78428 — Lisa Patel awaiting manual review',          time:'26m ago' },
-  ]
+  // Notifications = prescriptions currently waiting on the pharmacist, most severe first.
+  const notifications = rxList
+    .filter(r => r.status === 'MANUAL_REVIEW_NEEDED' && r.reviewStatus === 'PENDING_REVIEW')
+    .sort((a, b) => severityRank(b.highestSeverity) - severityRank(a.highestSeverity))
+    .slice(0, 6)
+
+  const openRx = (rx: ApiPrescription) => setOpenRxId(rx.id)
 
   return (
     <div className="app-shell">
-      {/* Sidebar */}
       <aside className="sidebar" role="navigation" aria-label="Main navigation">
         <div className="sidebar-logo">
           <div className="logo-icon">Rx</div>
           <div className="logo-text">
-            <div className="brand">RxGuardian</div>
+            <div className="brand">AutoScript</div>
             <div className="tagline">Safer Prescriptions.<br />Healthier People.</div>
           </div>
         </div>
@@ -1421,6 +1248,7 @@ export default function App() {
             >
               <span aria-hidden="true">{item.icon}</span>
               {item.label}
+              {item.id === 'reviews' && notifications.length > 0 && <span className="nav-count">{notifications.length}</span>}
             </button>
           ))}
         </nav>
@@ -1435,12 +1263,10 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Main */}
       <div className="main-content">
         <header className="topbar" role="banner">
-          {/* Global search */}
           <form className="search-bar" role="search"
-            onSubmit={e => { e.preventDefault(); if (globalSearch.trim()) { setActiveNav('prescriptions') } }}>
+            onSubmit={e => { e.preventDefault(); setSubmittedSearch(globalSearch.trim()); setActiveNav('prescriptions') }}>
             <SearchIcon />
             <input type="search" placeholder="Search prescriptions, patients, or Rx ID…"
               value={globalSearch} onChange={e => setGlobalSearch(e.target.value)}
@@ -1448,25 +1274,25 @@ export default function App() {
           </form>
 
           <div className="topbar-right">
-            {/* Notifications */}
             <div style={{ position:'relative' }}>
               <button className="icon-btn" aria-label="Notifications"
                 onClick={() => setNotifOpen(o => !o)}>
                 <BellIcon />
-                <span className="notif-badge" />
+                {notifications.length > 0 && <span className="notif-badge" />}
               </button>
               {notifOpen && (
                 <div className="notif-dropdown">
                   <div className="notif-header">
-                    <strong>Notifications</strong>
+                    <strong>Needs review</strong>
                     <button className="modal-close" style={{ width:24,height:24 }} onClick={() => setNotifOpen(false)}><XIcon /></button>
                   </div>
-                  {notifications.map((n, i) => (
-                    <div key={i} className="notif-item" onClick={() => { setActiveNav('prescriptions'); setNotifOpen(false) }}>
-                      <span className="notif-icon">{n.icon}</span>
+                  {notifications.length === 0 && <div className="notif-item">Nothing waiting for review.</div>}
+                  {notifications.map(n => (
+                    <div key={n.id} className="notif-item" onClick={() => { setOpenRxId(n.id); setNotifOpen(false) }}>
+                      <span className="notif-icon">{n.highestSeverity === 'CRITICAL' || n.highestSeverity === 'HIGH' ? '🚨' : '⚠️'}</span>
                       <div>
-                        <div style={{ fontSize:12, color:'#0f172a' }}>{n.text}</div>
-                        <div style={{ fontSize:11, color:'#94a3b8' }}>{n.time}</div>
+                        <div style={{ fontSize:12, color:'#0f172a' }}>{n.externalRef} — {n.patient ? fullName(n.patient) : 'No patient'} · {n.findingCount} finding(s)</div>
+                        <div style={{ fontSize:11, color:'#94a3b8' }}>{new Date(n.updatedAt).toLocaleTimeString()}</div>
                       </div>
                     </div>
                   ))}
@@ -1489,16 +1315,12 @@ export default function App() {
         </header>
 
         <main className="page-body">
-          {activeNav === 'dashboard'     && <Dashboard key={refreshKey} onUpload={() => openUpload()} onNavigate={setActiveNav} />}
-          {activeNav === 'prescriptions' && <PrescriptionsPage key={refreshKey} onUpload={() => openUpload()} />}
+          {activeNav === 'dashboard'     && <Dashboard rxList={rxList} stats={stats} loading={loading} error={error} onUpload={() => openUpload()} onOpen={openRx} onNavigate={setActiveNav} />}
+          {activeNav === 'prescriptions' && <PrescriptionsPage rxList={rxList} loading={loading} error={error} initialQuery={submittedSearch} onUpload={() => openUpload()} onOpen={openRx} />}
           {activeNav === 'patients'      && <PatientLookup onUploadForPatient={p => openUpload(p)} />}
-          {(activeNav === 'reviews' || activeNav === 'analytics' || activeNav === 'settings') && (
-            <div className="placeholder-page">
-              <div className="placeholder-icon">🚧</div>
-              <h2>{navItems.find(n => n.id === activeNav)?.label}</h2>
-              <p>This section is coming soon — prescription image AI review will live here.</p>
-            </div>
-          )}
+          {activeNav === 'reviews'       && <ReviewsPage rxList={rxList} loading={loading} onOpen={openRx} />}
+          {activeNav === 'analytics'     && <AnalyticsPage rxList={rxList} stats={stats} />}
+          {activeNav === 'settings'      && <SettingsPage />}
         </main>
       </div>
 
@@ -1509,6 +1331,7 @@ export default function App() {
           preselectedPatient={modalPatient}
         />
       )}
+      {openRxId && <PrescriptionDetail id={openRxId} onClose={() => setOpenRxId(null)} onChanged={refresh} />}
     </div>
   )
 }

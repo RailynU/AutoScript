@@ -1,0 +1,144 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Automated screening status. REVIEWED is legacy (kept readable, no longer written):
+/// the pharmacist disposition now lives in ReviewStatus.
+enum PrescriptionStatus {
+  PROCESSING
+  MANUAL_REVIEW_NEEDED
+  NO_FLAGS_DETECTED
+  REVIEWED
+  FAILED
+}
+
+/// Pharmacist disposition, independent of the screening status. No value means "approved for dispensing".
+enum ReviewStatus {
+  PENDING_REVIEW
+  REVIEWED
+  INTERVENTION_REQUIRED
+  INTERVENTION_DOCUMENTED
+  INFO_REQUESTED
+}
+
+enum SourceType {
+  PDF
+  IMAGE
+  TEXT
+  SIMULATED
+}
+
+/// Kind of pharmacist review action. MARK_REVIEWED is legacy (maps to REVIEWED).
+enum ReviewAction {
+  NOTE
+  MARK_REVIEWED
+  PRESCRIBER_CONTACTED
+  INFO_REQUESTED
+  INTERVENTION_DOCUMENTED
+  REVIEWED_NO_INTERVENTION
+  INTERVENTION_REQUIRED
+  OTHER
+}
+
+model Patient {
+  id                String              @id @default(uuid())
+  externalId        String              @unique
+  firstName         String
+  lastName          String
+  dateOfBirth       DateTime?           @db.Date
+  sex               String?
+  phone             String?
+  weightKg          Float?
+  renalFunctionNote String?
+  allergiesVerified Boolean             @default(false)
+  allergies         Allergy[]
+  conditions        Condition[]
+  medications       PatientMedication[]
+  prescriptions     Prescription[]
+  createdAt         DateTime            @default(now())
+
+  @@index([lastName, firstName])
+  @@index([phone])
+}
+
+model Allergy {
+  id         String    @id @default(uuid())
+  patientId  String
+  patient    Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  substance  String
+  reaction   String?
+  severity   String    @default("UNKNOWN")
+  recordedAt DateTime? @db.Date
+}
+
+model Condition {
+  id        String  @id @default(uuid())
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  name      String
+  icd10     String?
+  status    String  @default("ACTIVE")
+}
+
+model PatientMedication {
+  id          String    @id @default(uuid())
+  patientId   String
+  patient     Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  name        String
+  genericName String?
+  dose        String?
+  frequency   String?
+  startedAt   DateTime? @db.Date
+  active      Boolean   @default(true)
+}
+
+model Prescription {
+  id                String             @id @default(uuid())
+  externalRef       String             @unique
+  status            PrescriptionStatus @default(PROCESSING)
+  reviewStatus      ReviewStatus       @default(PENDING_REVIEW)
+  sourceType        SourceType
+  fileName          String?
+  filePath          String?
+  mimeType          String?
+  rawText           String?
+  /// Technician manual entry (AutoScript intake), verified against the script by the engine.
+  enteredData       Json?
+  patientId         String?
+  patient           Patient?           @relation(fields: [patientId], references: [id])
+  progressStage     String             @default("QUEUED")
+  progressMessage   String?
+  progressPercent   Int                @default(0)
+  failureReason     String?
+  /// Full AnalysisReport (shared schema) as returned by the RX Engine.
+  report            Json?
+  disposition       String?
+  findingCount      Int                @default(0)
+  highestSeverity   String?
+  medicationSummary String[]           @default([])
+  reviewedAt        DateTime?
+  reviews           Review[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([status])
+  @@index([reviewStatus])
+  @@index([createdAt(sort: Desc)])
+}
+
+model Review {
+  id             String       @id @default(uuid())
+  prescriptionId String
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id], onDelete: Cascade)
+  action         ReviewAction
+  pharmacistName String
+  notes          String?
+  createdAt      DateTime     @default(now())
+
+  @@index([prescriptionId, createdAt])
+}

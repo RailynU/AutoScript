@@ -14,8 +14,12 @@ export const AVATAR_COLORS = [
   'linear-gradient(135deg,#f97316,#ea580c)',
 ]
 
-export function avatarColor(id: number): string {
-  return AVATAR_COLORS[Math.abs(id) % AVATAR_COLORS.length]
+/** Patient ids are UUIDs; hash them to a stable palette index. */
+export function avatarColor(id: string | number): string {
+  const s = String(id)
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
+  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length]
 }
 
 export function initials(firstName: string, lastName: string): string {

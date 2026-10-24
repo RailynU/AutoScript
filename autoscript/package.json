@@ -1,0 +1,28 @@
+{
+  "name": "autoscript-backend",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.20.0",
+  "scripts": {
+    "db:up": "docker compose up -d --wait db",
+    "db:down": "docker compose down",
+    "db:migrate": "pnpm --filter @autoscript/api db:migrate",
+    "db:seed": "pnpm --filter @autoscript/api db:seed",
+    "rag:ingest": "pnpm --filter @autoscript/rx-engine rag:ingest",
+    "rag:ingest:examples": "pnpm --filter @autoscript/rx-engine rag:ingest:examples",
+    "fixtures": "pnpm --filter @autoscript/rx-engine fixtures",
+    "setup": "pnpm db:up && pnpm db:migrate && pnpm db:seed && pnpm rag:ingest && pnpm fixtures",
+    "dev": "pnpm -r --parallel --filter @autoscript/api --filter @autoscript/rx-engine dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "db:seed:patients": "pnpm --filter @autoscript/api db:seed:patients",
+    "dataset:build": "pnpm --filter @autoscript/rx-engine dataset:build --",
+    "dataset:us": "pnpm --filter @autoscript/rx-engine dataset:us --",
+    "demo:reset": "pnpm --filter @autoscript/api demo:reset --",
+    "eval": "pnpm --filter @autoscript/rx-engine eval --"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
