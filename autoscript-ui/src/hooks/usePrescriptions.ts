@@ -3,41 +3,37 @@
 // these so the UI renders and re-renders purely from backend state.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { prescriptionsApi } from '../api/prescriptions'
 import { ApiError } from '../api/client'
-import type { ApiPrescription, ApiStats, PrescriptionStatus } from '../api/types'
+import type { ApiPrescription, ApiPrescriptionDetail, ApiStats } from '../api/types'
+
+const POLL_MS = 4000
 
 interface PrescriptionsState {
   data: ApiPrescription[]
   stats: ApiStats | null
   loading: boolean
   error: string | null
-  /** Re-fetch list + stats from the backend. */
   refresh: () => Promise<void>
-  /** Change a prescription's status; list + stats update from the response. */
-  setStatus: (id: number, status: PrescriptionStatus) => Promise<void>
-  /** Server-side search (q matches patient / rxId / medication). */
-  search: (query: string) => Promise<void>
 }
 
-/** Loads prescriptions + stats and keeps them in sync with the backend. */
+/**
+ * Loads prescriptions + stats and keeps them in sync with the backend. Screening runs in
+ * the background, so the list is re-polled every few seconds.
+ */
 export function usePrescriptions(): PrescriptionsState {
   const [data, setData]       = useState<ApiPrescription[]>([])
   const [stats, setStats]     = useState<ApiStats | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState<string | null>(null)
 
-  const load = useCallback(async (query = '') => {
-    setLoading(true)
-    setError(null)
+  const load = useCallback(async () => {
     try {
-      const [list, st] = await Promise.all([
-        prescriptionsApi.list(query),
-        prescriptionsApi.stats(),
-      ])
+      const [list, st] = await Promise.all([prescriptionsApi.list(), prescriptionsApi.stats()])
       setData(list)
       setStats(st)
+      setError(null)
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to load prescriptions')
     } finally {
@@ -45,44 +41,36 @@ export function usePrescriptions(): PrescriptionsState {
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    load()
+    const t = setInterval(load, POLL_MS)
+    return () => clearInterval(t)
+  }, [load])
 
-  const refresh = useCallback(() => load(), [load])
-  const search  = useCallback((q: string) => load(q), [load])
-
-  const setStatus = useCallback(async (id: number, status: PrescriptionStatus) => {
-    try {
-      const updated = await prescriptionsApi.updateStatus(id, status)
-      setData(prev => prev.map(r => (r.id === updated.id ? updated : r)))
-      // stats changed too — pull the fresh counts
-      setStats(await prescriptionsApi.stats())
-    } catch (e) {
-      throw e instanceof ApiError ? e : new Error('Status update failed')
-    }
-  }, [])
-
-  return { data, stats, loading, error, refresh, setStatus, search }
+  return { data, stats, loading, error, refresh: load }
 }
 
-/** Lightweight hook for just the dashboard stat counts. */
-export function usePrescriptionStats() {
-  const [stats, setStats]     = useState<ApiStats | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError]     = useState<string | null>(null)
+/** One prescription's detail; polls while the engine is still processing it. */
+export function usePrescriptionDetail(id: string) {
+  const [data, setData]   = useState<ApiPrescriptionDetail | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const refresh = useCallback(async () => {
-    setLoading(true)
+  const load = useCallback(async () => {
     try {
-      setStats(await prescriptionsApi.stats())
+      const d = await prescriptionsApi.getById(id)
+      setData(d)
       setError(null)
+      if (d.status === 'PROCESSING') timer.current = setTimeout(load, 1500)
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : 'Failed to load stats')
-    } finally {
-      setLoading(false)
+      setError(e instanceof ApiError ? e.message : 'Failed to load prescription')
     }
-  }, [])
+  }, [id])
 
-  useEffect(() => { refresh() }, [refresh])
+  useEffect(() => {
+    load()
+    return () => { if (timer.current) clearTimeout(timer.current) }
+  }, [load])
 
-  return { stats, loading, error, refresh }
+  return { data, error, reload: load, setData }
 }

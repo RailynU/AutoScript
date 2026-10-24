@@ -12,7 +12,7 @@
     "rag:ingest:examples": "pnpm --filter @autoscript/rx-engine rag:ingest:examples",
     "fixtures": "pnpm --filter @autoscript/rx-engine fixtures",
     "setup": "pnpm db:up && pnpm db:migrate && pnpm db:seed && pnpm rag:ingest && pnpm fixtures",
-    "dev": "pnpm -r --parallel --filter './apps/*' dev",
+    "dev": "pnpm -r --parallel --filter @autoscript/api --filter @autoscript/rx-engine dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
