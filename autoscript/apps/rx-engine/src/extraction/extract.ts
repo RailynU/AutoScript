@@ -2,7 +2,7 @@ import { z } from "zod";
 import { normalizeDrugName } from "@autoscript/clinical-rules";
 import { ExtractedPrescriptionSchema, type AnalyzeRequest, type ExtractedPrescription } from "@autoscript/shared";
 import { extractJson, type ChatMessage, type LlmClient } from "../llm/client.js";
-import { pdfToText } from "./pdf.js";
+import { pdfFirstPageToPng, pdfToText } from "./pdf.js";
 
 /** What we ask the model for. Normalization happens locally afterwards. */
 const LlmMedicationSchema = z.object({
@@ -138,7 +138,11 @@ export async function extractPrescription(llm: LlmClient, source: AnalyzeRequest
   if (source.kind === "file" && source.mimeType === "application/pdf") {
     pdfText = await pdfToText(Buffer.from(source.base64, "base64"));
     if (pdfText.trim().length < MIN_PDF_TEXT_CHARS) {
-      throw new Error("The PDF has no readable text layer (scanned image?). Export it as JPG/PNG and upload the image instead.");
+      // Scanned PDF: no text layer, so render page 1 and let the vision model read it as an image.
+      const png = await pdfFirstPageToPng(Buffer.from(source.base64, "base64"));
+      source = { ...source, mimeType: "image/png", fileName: `${source.fileName} (page 1)`, base64: png.toString("base64") };
+      pdfText = null;
+      model = llm.visionModel;
     }
   } else if (source.kind === "file") {
     model = llm.visionModel;

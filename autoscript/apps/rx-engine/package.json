@@ -16,16 +16,16 @@
     "eval": "tsx --env-file=../../.env scripts/eval.ts"
   },
   "dependencies": {
-    "@fastify/cors": "^10.0.1",
     "@autoscript/clinical-rules": "workspace:*",
     "@autoscript/shared": "workspace:*",
+    "@fastify/cors": "^10.0.1",
+    "@napi-rs/canvas": "^0.1.60",
     "fastify": "^5.1.0",
     "pg": "^8.13.1",
     "unpdf": "^0.12.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@napi-rs/canvas": "^0.1.60",
     "@types/node": "^22.9.0",
     "@types/pg": "^8.11.10",
     "dotenv-cli": "^7.4.2",
