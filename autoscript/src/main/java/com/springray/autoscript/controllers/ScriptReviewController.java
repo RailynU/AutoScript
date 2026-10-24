@@ -1,11 +1,16 @@
 package com.springray.autoscript.controllers;
 
+import com.springray.autoscript.dto.ErrorResponse;
 import com.springray.autoscript.dto.ReviewResult;
 import com.springray.autoscript.dto.ScriptData;
+import com.springray.autoscript.exception.ExtractionFailedException;
+import com.springray.autoscript.exception.InvalidScriptImageException;
 import com.springray.autoscript.services.ExtractionService;
 import com.springray.autoscript.services.ScriptValidationService;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -39,5 +44,17 @@ public class ScriptReviewController {
         ScriptData extracted = extractionService.extract(image);
         ReviewResult result = scriptValidationService.review(extracted, scriptData);
         return ResponseEntity.ok(result);
+    }
+
+    @ExceptionHandler(InvalidScriptImageException.class)
+    public ResponseEntity<ErrorResponse> handleInvalidImage(InvalidScriptImageException e) {
+        return ResponseEntity.unprocessableEntity()
+                .body(new ErrorResponse(e.getErrorCode(), e.getMessage()));
+    }
+
+    @ExceptionHandler(ExtractionFailedException.class)
+    public ResponseEntity<ErrorResponse> handleExtractionFailure(ExtractionFailedException e) {
+        return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                .body(new ErrorResponse("EXTRACTION_FAILED", e.getMessage()));
     }
 }
