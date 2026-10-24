@@ -8,6 +8,7 @@ import { usePrescriptions } from './hooks/usePrescriptions'
 import { avatarColor, initials } from './ui/avatar'
 import { PrescriptionPreview } from './components/PrescriptionPreview'
 import { scriptsApi } from './api/scripts'
+import type { Flag, ReviewResult } from './api/scripts'
 import { ApiError } from './api/client'
 import type {
   ApiPatient,
@@ -158,6 +159,9 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
   const [error,   setError]           = useState<string | null>(null)
   const [autofilling, setAutofilling] = useState(false)
   const [autofillNote, setAutofillNote] = useState<string | null>(null)
+  const [reviewing, setReviewing]     = useState(false)
+  const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null)
+  const [reviewNote, setReviewNote]   = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   async function handleAutofill() {
@@ -189,6 +193,38 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
       }
     } finally {
       setAutofilling(false)
+    }
+  }
+
+  async function handleReview() {
+    if (!file) return
+    setReviewing(true)
+    setReviewNote(null)
+    setReviewResult(null)
+    setError(null)
+    try {
+      // Send the entered fields to be compared against the image. The form only
+      // surfaces medication/instructions/prescriber, so map those; patient
+      // identity comes from the selected patient record.
+      const result = await scriptsApi.review(file, {
+        patientFirstName: patient?.firstName ?? null,
+        patientLastName:  patient?.lastName ?? null,
+        drugName:      medication.trim() || null,
+        directions:    instructions.trim() || null,
+        prescriberName: prescriber.trim() || null,
+      })
+      setReviewResult(result)
+      setReviewNote(result.flags.length === 0
+        ? '✅ No mismatches — the entered details match the prescription image.'
+        : `⚠️ ${result.flags.length} field${result.flags.length !== 1 ? 's' : ''} differ from the image. Review the flags below.`)
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) {
+        setReviewNote('AI review is not enabled on the server.')
+      } else {
+        setReviewNote(e instanceof Error ? e.message : 'Review could not be completed.')
+      }
+    } finally {
+      setReviewing(false)
     }
   }
 
@@ -368,12 +404,30 @@ function UploadModal({ onClose, onCreated, preselectedPatient }: UploadModalProp
                 {/* Autofill / manual entry toggle */}
                 <div className="entry-mode-row">
                   <span className="entry-mode-label">Medication details</span>
-                  <button className="btn-autofill" onClick={handleAutofill} disabled={!file || autofilling}
-                    title={file ? 'Extract fields from the image using AI' : 'Upload an image first to autofill'}>
-                    {autofilling ? <><Spinner small /> Reading image…</> : <>✨ Autofill from image</>}
-                  </button>
+                  <div style={{ display:'flex', gap:8 }}>
+                    <button className="btn-autofill" onClick={handleAutofill} disabled={!file || autofilling}
+                      title={file ? 'Extract fields from the image using AI' : 'Upload an image first to autofill'}>
+                      {autofilling ? <><Spinner small /> Reading image…</> : <>✨ Autofill from image</>}
+                    </button>
+                    <button className="btn-autofill" onClick={handleReview}
+                      disabled={!file || reviewing || !medication.trim()}
+                      title={!file ? 'Upload an image first' : !medication.trim() ? 'Enter at least the medication' : 'Verify the entered details against the image'}>
+                      {reviewing ? <><Spinner small /> Verifying…</> : <>🛡️ Verify against image</>}
+                    </button>
+                  </div>
                 </div>
                 {autofillNote && <div className="autofill-note">{autofillNote}</div>}
+                {reviewNote && <div className="autofill-note">{reviewNote}</div>}
+                {reviewResult && reviewResult.flags.length > 0 && (
+                  <ul className="review-flags">
+                    {reviewResult.flags.map((f: Flag) => (
+                      <li key={f.field} className="review-flag">
+                        <span className="review-flag-field">{f.field}</span>
+                        <span className="review-flag-desc">{f.description}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
 
                 <div className="create-form-grid" style={{ marginTop: 12 }}>
                   <div className="field-group" style={{ gridColumn:'1 / -1' }}>
