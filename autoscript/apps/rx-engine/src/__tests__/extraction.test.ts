@@ -43,13 +43,15 @@ describe("extractPrescription", () => {
     expect(Array.isArray(user.content) && user.content.some((p) => p.type === "image_url")).toBe(true);
   });
 
-  it("fails explicitly for PDFs without a text layer", async () => {
-    const llm = new FakeLlm([]);
+  it("renders scanned PDFs (no text layer) to PNG for the vision model", async () => {
+    const llm = new FakeLlm([{ medications: [], overallConfidence: 0.2, uncertainties: ["scanned"] }]);
     const { PDFDocument } = await import("pdf-lib");
     const doc = await PDFDocument.create();
     doc.addPage();
     const bytes = await doc.save();
-    await expect(extractPrescription(llm, { kind: "file", fileName: "blank.pdf", mimeType: "application/pdf", base64: Buffer.from(bytes).toString("base64") })).rejects.toThrow(/no readable text layer/);
+    await extractPrescription(llm, { kind: "file", fileName: "scan.pdf", mimeType: "application/pdf", base64: Buffer.from(bytes).toString("base64") });
+    const user = llm.calls[0]![1]!;
+    expect(Array.isArray(user.content) && user.content.some((p) => p.type === "image_url" && p.image_url.url.startsWith("data:image/png;base64,"))).toBe(true);
   });
 });
 

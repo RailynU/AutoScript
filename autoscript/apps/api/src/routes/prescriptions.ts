@@ -93,8 +93,14 @@ export async function prescriptionRoutes(app: FastifyInstance, ctx: AppContext) 
     if (buffer.length === 0) return reply.code(422).send({ code: "FILE_MISSING", error: "No script image was provided." });
     if (!sourceTypeForMime(file.mimetype)) return reply.code(422).send({ code: "UNSUPPORTED_FORMAT", error: "The script image must be a JPEG, PNG, or PDF file." });
     if (!ctx.engine.extract) return reply.code(501).send({ error: "Autofill is not available" });
-    const extraction = await ctx.engine.extract({ fileName: file.filename, mimeType: file.mimetype, base64: buffer.toString("base64") });
-    return { scriptData: toScriptData(extraction), extraction };
+    try {
+      const extraction = await ctx.engine.extract({ fileName: file.filename, mimeType: file.mimetype, base64: buffer.toString("base64") });
+      return { scriptData: toScriptData(extraction), extraction };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      app.log.warn({ err: message }, "autofill extract failed");
+      return reply.code(502).send({ code: "EXTRACTION_FAILED", error: `Could not read the script: ${message}` });
+    }
   });
 
   /** Simulated incoming event (e.g. e-prescription feed) using a synthetic scenario. */
