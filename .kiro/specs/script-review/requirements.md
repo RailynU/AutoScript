@@ -10,9 +10,14 @@ values the user typed in. Mismatches are returned as flags so the user can corre
 errors before dispensing.
 
 This document captures the behavior of the system **as currently implemented** on the
-backend, plus the requirements for the frontend that consumes the existing REST API. The
-frontend is not yet implemented; its requirements describe the client needed to drive the
-API that already exists.
+backend, plus the requirements for the frontend that consumes the existing REST API.
+
+Project layout (monorepo):
+
+- `autoscript/` — Spring Boot 4.1 REST API (Java 17, Spring AI). **Implemented.**
+- `autoscript-ui/` — React 19 + TypeScript single-page app built with Vite, proxying
+  `/api/*` to the backend on `http://localhost:8080` during development. **Scaffolded
+  but the review UI is not yet built** — `App.tsx` is still the default Vite template.
 
 Scope note: the current backend keeps all state in memory (no database). Scripts and
 review results do not survive a restart. This is reflected in the requirements as a known
@@ -138,11 +143,15 @@ surface actionable messages to users.
 4. WHERE the error is a review failure THE HTTP status SHALL be 502 and the code SHALL be
    `REVIEW_FAILED`.
 
-### Requirement 6 — Review web client (frontend, not yet implemented)
+### Requirement 6 — Review web client (React frontend, not yet implemented)
 
 **User Story:** As a pharmacy technician, I want a web interface to upload a script, review
 the pre-filled fields, submit for verification, and see flags, so that I can do my job
 without calling the API directly.
+
+Status: the `autoscript-ui` React/Vite project is scaffolded (dev proxy to the backend is
+configured) but the acceptance criteria below are **not yet implemented**; `App.tsx` is
+still the default Vite starter.
 
 #### Acceptance Criteria
 
@@ -153,12 +162,25 @@ without calling the API directly.
    clean result when there are none.
 3. WHEN the API returns an error response THEN the client SHALL display the `message` and
    distinguish validation errors (422) from upstream failures (502).
-4. WHEN the user opens a dashboard THEN the client SHALL list scripts by `queued`,
-   `in-review`, and `completed`, and SHALL allow opening a completed script's result.
+4. WHEN the user opens the Dashboard at the `/dashboard` client-side route THEN the client
+   SHALL render three labeled sections — Queued, In Review, and Completed — backed by
+   `GET /queued`, `GET /in-review`, and `GET /completed`, and SHALL allow opening a
+   completed script's result via `GET /{id}/result`.
 5. WHERE a field value is null from extraction THE client SHALL render an empty, editable
    input rather than the literal "null".
-6. THE client SHALL enforce the same upload constraints as the backend (type and 10 MB
-   size) before submitting, as a usability aid, while still handling backend rejections.
+6. THE client SHALL enforce the same upload constraints as the backend (type ∈ {JPEG, PNG,
+   PDF} and 10 MB size) before submitting, as a usability aid, while still handling backend
+   rejections.
+7. WHILE an `/autofill` request is in progress THE client SHALL disable the Autofill action
+   and show a loading indicator until it completes or fails.
+8. WHERE the data entry form is rendered THE client SHOULD apply client-side field guards as
+   a usability aid (these mirror typical pharmacy ranges and are not enforced by the current
+   backend, which compares extracted vs. entered values rather than validating ranges):
+   drug name ≤ 200 chars, directions ≤ 500 chars, quantity 1–9999, day supply 1–365,
+   refill count 0–99, prescriber name ≤ 100 chars, NPI exactly 10 digits, phone exactly
+   10 digits.
+9. THE Dashboard SHALL format timestamps in the user's local timezone and SHALL show an
+   explicit empty-state message for any section that contains no scripts.
 
 ## Known Constraints and Non-Goals (current implementation)
 
@@ -171,3 +193,8 @@ without calling the API directly.
 - There is no `GET /api/scripts/{id}` for the full script, only `/{id}/result`.
 - No authentication/authorization is implemented; PHI handling and compliance (e.g.
   HIPAA) are out of scope for the current build and flagged as a future concern.
+- The review the backend performs is a **field-by-field comparison** of AI-extracted
+  values against the user's manual entry. It does NOT perform content-level dispensing
+  checks (formulary drug-name lookup, Luhn validation of the NPI, day-supply derived from
+  quantity and directions frequency). Those richer checks were explored in an earlier
+  draft spec and are recorded here as possible future work, not current behavior.

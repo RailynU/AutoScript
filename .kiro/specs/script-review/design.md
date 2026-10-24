@@ -140,12 +140,21 @@ ScriptStatus = { QUEUED, IN_REVIEW, COMPLETED, REVIEW_FAILED }
 
 Error body: `{ "code": "...", "message": "..." }`.
 
-## Frontend Design (to be implemented)
+## Frontend Design (`autoscript-ui` — scaffolded, UI not yet built)
 
-The frontend is a thin client over the existing API. No framework is prescribed by the
-current repo; a lightweight SPA (or server-rendered pages under `resources/templates` +
-static JS) both work. Recommended minimal approach to avoid adding a Node toolchain:
-static assets in `src/main/resources/static` served by Spring Boot.
+The frontend is a separate React 19 + TypeScript single-page app built with Vite, living
+in the sibling `autoscript-ui/` directory. It is a thin client over the existing REST API.
+
+Current state:
+- The Vite project is scaffolded with React, TypeScript, and ESLint.
+- `vite.config.ts` runs the dev server on port 5173 and proxies `/api/*` to the Spring
+  Boot backend on `http://localhost:8080`, so the browser calls `/api/...` without CORS
+  setup during development.
+- `App.tsx` is still the default Vite starter; none of the screens below exist yet.
+
+Build/serve model: in development the Vite dev server (5173) proxies to Boot (8080). For a
+single-artifact deployment, `npm run build` emits static assets to `autoscript-ui/dist`,
+which can be served by Spring Boot or any static host; this wiring is not set up yet.
 
 ### Screens / flows
 1. **Upload & Review**
@@ -159,6 +168,21 @@ static assets in `src/main/resources/static` served by Spring Boot.
 2. **Dashboard**
    - Three lists from `/queued`, `/in-review`, `/completed`, each rendering
      `ScriptSummary` (id, status, timestamps, drug, quantity, flag count).
+   - Completed rows link to a result view using `/{id}/result`.
+
+### Screens / flows (target for `autoscript-ui`)
+1. **Upload & Review**
+   - File picker → client-side guard (type ∈ {jpeg, png, pdf}, ≤ 10 MB).
+   - On select: `POST /autofill`; render an editable form bound to `ScriptData`; null →
+     empty input. Disable Autofill and show a spinner while the request is in flight.
+   - Submit: build multipart with the original image + edited `scriptData` JSON part;
+     `POST /review`; render flags grouped by field, or a clear "no mismatches" state.
+   - Error handling: show `ErrorResponse.message`; style 422 as "fix input" and 502 as
+     "service problem, retry".
+2. **Dashboard** (`/dashboard` route)
+   - Three sections from `/queued`, `/in-review`, `/completed`, each rendering
+     `ScriptSummary` (id, status, timestamps, drug, quantity, flag count) with an explicit
+     empty-state message when a section has no scripts.
    - Completed rows link to a result view using `/{id}/result`.
 
 ### Client considerations
