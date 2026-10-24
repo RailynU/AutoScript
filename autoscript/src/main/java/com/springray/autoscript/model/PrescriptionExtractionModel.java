@@ -1,6 +1,8 @@
 package com.springray.autoscript.model;
 
-import com.springray.autoscript.dto.ScriptData;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.ByteArrayResource;
@@ -11,12 +13,11 @@ import org.springframework.util.MimeTypeUtils;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.IOException;
-import java.io.UncheckedIOException;
+import com.springray.autoscript.dto.ScriptData;
 
 @Component
-@ConditionalOnProperty(name = "autoscript.ai.enabled", havingValue = "true")
-public class PrescriptionExtractionModel {
+@ConditionalOnProperty(name = "autoscript.ai.mode", havingValue = "openai", matchIfMissing = true)
+public class PrescriptionExtractionModel implements PrescriptionExtractor {
 
     private final ChatClient chatClient;
     private final PromptProvider promptProvider;
@@ -26,6 +27,7 @@ public class PrescriptionExtractionModel {
         this.promptProvider = promptProvider;
     }
 
+    @Override
     public ScriptData extractPrescription(MultipartFile image) {
         Resource imageResource = toResource(image);
         MimeType mimeType = resolveMimeType(image);
