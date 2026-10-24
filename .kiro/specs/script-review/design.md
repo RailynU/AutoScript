@@ -2,223 +2,243 @@
 
 ## Overview
 
-AutoScript is a single Spring Boot 4.1 service (Java 17) that exposes a REST API for
-extracting prescription data from an uploaded image and verifying manually entered data
-against it. Extraction is delegated to an OpenAI vision model (`gpt-4o-mini`) through
-Spring AI's `ChatClient`. All runtime state lives in memory.
+AutoScript is split into two Node.js services that share one PostgreSQL database, plus a
+React client:
 
-This design documents the system as built on the backend and specifies the frontend that
-will consume it. Where the current implementation has notable limitations, they are called
-out explicitly so the design doubles as an accurate map of the code.
+- **API** (`autoscript/apps/api`, Fastify 5 + Prisma 6, port 8080): owns patients,
+  prescriptions, uploads, reviews and statistics. Every public route is mounted under `/api`.
+  It dispatches each prescription to the engine and receives progress and results through a
+  callback.
+- **RX Engine** (`autoscript/apps/rx-engine`, Fastify, port 4210): reads the script, runs the
+  deterministic clinical rules, retrieves evidence from the curated reference collection and
+  runs the evidence-grounded AI pass. It owns the RAG tables (plain SQL, pgvector + tsvector).
+- **Shared packages**: `@autoscript/shared` (zod contracts for every payload crossing a
+  process boundary) and `@autoscript/clinical-rules` (rule tables, rules, disposition policy).
+- **Web client** (`autoscript-ui`, React 19 + Vite, port 5173): intake, results, review queue.
+
+The engine screens and routes. It never approves a prescription and never calls one safe.
 
 ## Architecture
 
 ```
-                      ┌─────────────────────────────────────────────┐
-  Browser / client    │                 Spring Boot                  │
-  ────────────▶ HTTP  │                                              │
-                      │  ScriptReviewController  (REST, /api/scripts) │
-                      │        │              │                       │
-                      │        ▼              ▼                       │
-                      │  ExtractionService   ScriptReviewService      │
-                      │        │              │     │                 │
-                      │        ▼              │     ▼                 │
-                      │  PrescriptionExtraction│   ScriptValidation    │
-                      │        Model           │     Service           │
-                      │        │              │     │                 │
-                      │        ▼              ▼     ▼                 │
-                      │  Spring AI ChatClient  ScriptQueue (in-memory) │
-                      └────────┼──────────────────────────────────────┘
-                               ▼
-                         OpenAI gpt-4o-mini
+ autoscript-ui (Vite :5173)
+        │  /api/* (dev proxy)
+        ▼
+ ┌──────────────────────────── API :8080 (/api) ────────────────────────────┐
+ │ routes: patients · prescriptions · reviews · stats · events (SSE)          │
+ │         internal/prescriptions/:id/engine-callback                         │
+ │ services: intake · engineClient · reviewActions · staleSweeper · scriptData│
+ │ Prisma ─────────────────────────────────────────────┐                      │
+ └───────────────┬──────────────────────────────────────┼──────────────────────┘
+       POST /analyze, /extract              ▲ callback  │
+                 ▼                          │           ▼
+ ┌──────────────────────── RX Engine :4210 ─┴──┐   PostgreSQL 16 + pgvector (:5433)
+ │ extraction (LLM vision / PDF text layer)    │   Patient, Allergy, Condition,
+ │ normalization (local drug map)              │   PatientMedication, Prescription,
+ │ clinical-rules: runRules → findings         │   Review  (Prisma)
+ │ RAG: Retriever VECTOR → LEXICAL → NONE  ────┼─▶ reference_documents,
+ │ AI pass: cited explanations + observations  │   reference_chunks, case_examples
+ │ decideDisposition                           │   (engine-owned SQL)
+ └──────────────┬──────────────────────────────┘
+                ▼
+     OpenAI-compatible LLM (OpenRouter): chat, vision, embeddings
 ```
-
-### Layering
-
-- **Controller** (`ScriptReviewController`): HTTP surface under `/api/scripts`, maps
-  multipart requests to services and exceptions to `ErrorResponse` via `@ExceptionHandler`.
-- **Services**: `ExtractionService` (validation + AI call), `ScriptValidationService`
-  (field comparison / flags), `ScriptReviewService` (orchestration + lifecycle),
-  `ScriptQueue` (in-memory store and queue).
-- **Model**: `PrescriptionExtractionModel` (Spring AI wrapper), `PromptProvider` (prompt
-  selection), `Script` (lifecycle entity), `ScriptStatus` (enum).
-- **DTOs**: `ScriptData`, `ReviewResult`, `Flag`, `ScriptSummary`, `ErrorResponse` — all
-  Java records, serialized as JSON.
 
 ## Components and Responsibilities
 
-### ScriptReviewController
-- `POST /autofill` (multipart `image`) → `ScriptData` (200).
-- `POST /review` (multipart part `image` + JSON part `scriptData`) → `ReviewResult` (200).
-- `GET /queued`, `GET /in-review`, `GET /completed` → `List<ScriptSummary>` (200).
-- `GET /{id}/result` → `ReviewResult` (200) or 404.
-- Exception handling:
-  - `InvalidScriptImageException` → 422 + code from the exception.
-  - `ExtractionFailedException` → 502 + `EXTRACTION_FAILED`.
-  - `ReviewFailedException` → 502 + `REVIEW_FAILED`.
+### API (`apps/api`)
 
-### ExtractionService
-Validates the upload then calls the model:
-- Rejects null/empty → `FILE_MISSING`; > 10 MB → `FILE_TOO_LARGE`; content type not in
-  {`image/jpeg`, `image/png`, `application/pdf`} → `UNSUPPORTED_FORMAT`.
-- Wraps any model exception in `ExtractionFailedException`.
+- **server.ts** — `buildServer({ env, db, engine, logger, sweeper })`: registers CORS,
+  multipart (20 MB, one file), the error handler, `/health` and the route plugins under the
+  `/api` prefix. Unexpected errors become `500 { error: "Internal server error" }`; 4xx
+  errors keep their message; zod errors become `400 { error: "Validation failed", issues }`.
+- **routes/prescriptions.ts** — list (filters + `limit`), detail, original file, text intake,
+  upload (`file` + `patientId` + `enteredData`), extract (autofill), scenarios, simulate,
+  retry.
+- **routes/reviews.ts** — `POST /prescriptions/:id/reviews`; writes the `Review` row and the
+  review status update in one transaction.
+- **routes/patients.ts** — free-text and field lookup, detail with full context, create.
+- **routes/stats.ts** — counts by screening status and by review status.
+- **routes/events.ts** — `GET /events`, server-sent events fed by the in-process event bus.
+- **routes/engineCallbacks.ts** — `POST /internal/prescriptions/:id/engine-callback`; applies
+  `progress`, `result` and `failed` callbacks (validated with `EngineCallbackSchema`).
+- **services/intake.ts** — `createPrescription` (stores the upload under `UPLOAD_DIR`, creates
+  the row, publishes `created`) and `dispatchToEngine` (loads patient context and posts an
+  `AnalyzeRequest`).
+- **services/reviewActions.ts** — maps a review kind to the prescription update using
+  `REVIEW_KIND_TRANSITIONS` and `REVIEW_COMPLETING_STATUSES`.
+- **services/staleSweeper.ts** — marks `PROCESSING` rows with no update for
+  `PROCESSING_TIMEOUT_MS` as `FAILED`; runs at startup and every `STALE_SWEEP_INTERVAL_MS`.
+- **services/scriptData.ts** — `toScriptData(extraction)`: extraction → entry-form shape.
+- **scripts/demo-reset.ts** — empties prescriptions, reviews and uploads; keeps patients.
 
-### PrescriptionExtractionModel
-Wraps Spring AI `ChatClient`. Builds a prompt with the system prompt from `PromptProvider`
-and a user message carrying the image as `media(mimeType, resource)`, then requests a typed
-`.entity(ScriptData.class)` response. MIME type comes from the upload's content type,
-falling back to PNG.
+### RX Engine (`apps/rx-engine`)
 
-### PromptProvider
-Discovers `classpath:prompts/prompt<N>.txt`, indexes by numeric suffix in a `TreeMap`.
-Selects `promptN.txt` when `autoscript.extraction.prompt` > 0, otherwise the lowest
-numbered prompt. Throws on missing configured prompt or no prompts found.
+- **server.ts** — `GET /health`, `GET /references`, `POST /analyze` (202, runs the pipeline in
+  the background), `POST /extract` (synchronous extraction for autofill).
+- **pipeline.ts** — `runPipeline` with a hard deadline (`ANALYSIS_TIMEOUT_MS`): extract →
+  normalize → load context → `runRules` → attach evidence → similar cases → AI pass →
+  `decideDisposition`. After the first terminal callback nothing else is sent.
+- **extraction/** — images go to the vision model; PDFs use the text layer (a PDF without one
+  fails explicitly); pasted text goes to the text model. Output is `ExtractedPrescription`
+  with per-line confidence, `uncertainties` and `overallConfidence`.
+- **rag/** — `references.ts` parses frontmatter and cuts section-aware chunks; `ingest.ts`
+  writes documents and chunks (embedding when a provider is configured); `retrieve.ts`
+  `Retriever.search` tries vector similarity, then strict and loose full-text search;
+  `examples.ts` / `ingestExamples.ts` handle labelled dataset cases.
+- **analysis/aiAnalysis.ts** — builds the grounded prompt, validates citations against the
+  provided evidence pool, clamps unsupported observations (`UNSUPPORTED_SEVERITY_CAP = LOW`).
+- **eval/**, **dataset/** — offline evaluation and dataset builders (`pnpm eval`,
+  `pnpm dataset:build`, `pnpm dataset:us`).
 
-### ScriptValidationService
-Produces a `ReviewResult` by comparing each field of extracted vs. manual `ScriptData`:
-- **Text** (`compareText`): trim, collapse whitespace, lowercase; blank treated as null.
-  Fields: first/last name, drug name, directions, prescriber name.
-- **Digits** (`compareDigits`): strip non-digits; blank treated as null. Fields: NPI,
-  phone.
-- **Value** (`compareValue`): `Objects.equals`. Fields: DOB, quantity, day supply, refill
-  count.
-- Each mismatch becomes a `Flag(field, description)` where the description names the
-  entered value and the on-script value ("blank" when null/blank).
-- Returns `ReviewResult(scriptId=null, status="COMPLETED", reviewedAt=now, flags)`; the
-  caller re-stamps `scriptId`.
+### Clinical rules (`packages/clinical-rules`)
 
-### ScriptReviewService (orchestration + lifecycle)
-`review(image, manualEntry)`:
-1. `scriptQueue.add(manualEntry)` → new `QUEUED` script.
-2. `scriptQueue.pull(id)` → transitions to `IN_REVIEW` (throws `ReviewFailedException` if
-   not pullable).
-3. `extractionService.extract(image)` then `scriptValidationService.review(...)`.
-4. Re-stamp result with the script id, `script.markCompleted(result)`, return it.
-5. On `InvalidScriptImageException`: `markReviewFailed()` and rethrow (→ 422).
-6. On any other exception: `markReviewFailed()` and throw `ReviewFailedException` (→ 502).
-7. `finally`: `scriptQueue.pop(id)` removes it from the queued set.
+| Rule id                     | Finding type                                     |
+|-----------------------------|--------------------------------------------------|
+| `interaction.pairwise`      | `DRUG_INTERACTION`                               |
+| `allergy.cross-reactivity`  | `ALLERGY_CONFLICT`                               |
+| `context.no-patient`        | `MISSING_PATIENT_INFO`                           |
+| `context.allergy-history`   | `MISSING_PATIENT_INFO`                           |
+| `context.demographics`      | `MISSING_PATIENT_INFO`                           |
+| `rx.missing-fields`         | `MISSING_PRESCRIPTION_INFO`                      |
+| `rx.unresolved-drug`        | `EXTRACTION_UNCERTAINTY`                         |
+| `rx.extraction-confidence`  | `EXTRACTION_UNCERTAINTY`                         |
+| `therapy.duplicate`         | `DUPLICATE_THERAPY`                              |
+| `dose.daily-maximum`        | `DOSE_CONCERN`                                   |
+| `condition.contraindication`| `CONDITION_CONFLICT`                             |
+| `entry.verify`              | `DATA_ENTRY_MISMATCH`                            |
 
-Listing methods map `ScriptQueue.findByStatus(...)` to `ScriptSummary`, applying the
-ordering in Requirement 3. `reviewResult(id)` returns the stored result or empty.
+`runRules` sorts findings by severity and returns `rulesEvaluated` and `limitations`.
+`RULES_VERSION = "autoscript-rules-2026.10"`; the engine version is
+`rx-engine/0.1.0+autoscript-rules-2026.10`. Each rule names reference ids and a retrieval
+query so its finding can be grounded.
 
-### ScriptQueue (in-memory store)
-- `ConcurrentHashMap<String, Script>` for all scripts, keyed by id.
-- `ConcurrentLinkedQueue<String>` of queued ids; `AtomicLong` id sequence.
-- `add`, `pull()`/`pull(id)` (synchronized, transition to IN_REVIEW), `pop`, `remove`,
-  `find`, `findByStatus`, `hasQueued`.
+#### Manual entry verification (`entry.verify`)
 
-### Script (entity)
-Holds id, timestamps, `volatile` status/data/result. `markInReview`, `markCompleted`,
-`markReviewFailed` are `synchronized` and enforce the legal state transitions described in
-Requirement 3.
+Compares `enteredData` with the extraction, choosing the extracted medication line whose
+generic matches the typed drug (else the first line). Text is lower-cased with punctuation
+stripped; person names drop titles/credentials and flag words missing from the script; dates
+are normalized from ISO or US formats; NPI and phone compare digits only; quantity, refills
+and day supply compare the first integer. Severities: drug `CRITICAL`; patient name, DOB,
+strength, quantity `HIGH`; refills, day supply, prescriber `MODERATE`; directions `HIGH` when
+the numbers differ, else `LOW`.
+
+#### Disposition policy (`decideDisposition`)
+
+```
+any deterministic finding           → MANUAL_REVIEW_NEEDED
+no patient linked                   → MANUAL_REVIEW_NEEDED
+no medications extracted            → MANUAL_REVIEW_NEEDED
+overallConfidence < 0.7             → MANUAL_REVIEW_NEEDED
+AI pass did not complete            → MANUAL_REVIEW_NEEDED
+AI observation proposed ≥ MODERATE  → MANUAL_REVIEW_NEEDED   (proposedSeverity, before clamp)
+otherwise                           → NO_FLAGS_DETECTED      ("not a statement of clinical safety")
+```
+
+### Retrieval fallback
+
+```
+search(query)
+  ├─ embeddings configured and query embedded → pgvector cosine (VECTOR) → rows? return
+  ├─ full-text, strict terms (LEXICAL)         → ≥ limit? return
+  ├─ full-text, loose terms (LEXICAL)          → merge, dedupe, return
+  └─ nothing ingested                          → NONE (limitation: run `pnpm rag:ingest`)
+```
 
 ## Data Models
 
-```
-ScriptData(patientFirstName, patientLastName, patientDateOfBirth:LocalDate,
-           drugName, directions, quantity:Integer, daySupply:Integer,
-           refillCount:Integer, prescriberName, prescriberNpi, prescriberPhone)
+Prisma (`apps/api/prisma/schema.prisma`):
 
-Flag(field, description)
-ReviewResult(scriptId, status, reviewedAt:Instant, flags:List<Flag>)
-ScriptSummary(id, status, submittedAt, reviewStartedAt, completedAt,
-              drugName, quantity:Integer, flagCount:Integer)
-ErrorResponse(code, message)
-ScriptStatus = { QUEUED, IN_REVIEW, COMPLETED, REVIEW_FAILED }
 ```
+Patient(id, externalId, firstName, lastName, dateOfBirth?, sex?, phone?, weightKg?,
+        renalFunctionNote?, allergiesVerified, allergies[], conditions[], medications[])
+Allergy(substance, reaction?, severity: MILD|MODERATE|SEVERE|UNKNOWN)
+Condition(name, icd10?, status: ACTIVE|RESOLVED)
+PatientMedication(name, genericName?, dose?, frequency?, active)
+Prescription(id, externalRef, status, reviewStatus, sourceType, fileName?, filePath?,
+             mimeType?, rawText?, patientId?, enteredData Json?, report Json?,
+             progressStage, progressMessage?, progressPercent, failureReason?,
+             createdAt, updatedAt, reviewedAt?)
+Review(id, prescriptionId, action, pharmacistName, notes?, createdAt)
+```
+
+Enums: `PrescriptionStatus = PROCESSING | MANUAL_REVIEW_NEEDED | NO_FLAGS_DETECTED | REVIEWED
+(legacy, read-only) | FAILED`; `ReviewStatus = PENDING_REVIEW | REVIEWED |
+INTERVENTION_REQUIRED | INTERVENTION_DOCUMENTED | INFO_REQUESTED`; `SourceType = PDF | IMAGE |
+TEXT | SIMULATED`.
+
+Contracts (`packages/shared`): `EnteredScriptData`, `ExtractedPrescription`, `Finding`
+(type, severity, title, explanation, aiContext, origin, evidence, reviewQuestions,
+deterministic, therapyContext, severitySource, supportStatus, proposedSeverity),
+`EvidenceRef` (chunkId, documentId, title, source, url, section, excerpt, retrieval
+`VECTOR|LEXICAL|RULE`, score), `AnalysisReport` (disposition, dispositionReason, extraction,
+findings, evidence, ai, coverage, engineVersion), `AnalyzeRequest`, `EngineCallback`.
 
 ## API Contract
 
-| Method | Path                      | Request                               | Success            | Errors |
-|--------|---------------------------|---------------------------------------|--------------------|--------|
-| POST   | `/api/scripts/autofill`   | multipart `image`                     | 200 `ScriptData`   | 422, 502 |
-| POST   | `/api/scripts/review`     | multipart part `image` + json `scriptData` | 200 `ReviewResult` | 422, 502 |
-| GET    | `/api/scripts/queued`     | —                                     | 200 `ScriptSummary[]` | — |
-| GET    | `/api/scripts/in-review`  | —                                     | 200 `ScriptSummary[]` | — |
-| GET    | `/api/scripts/completed`  | —                                     | 200 `ScriptSummary[]` | — |
-| GET    | `/api/scripts/{id}/result`| —                                     | 200 `ReviewResult` | 404 |
+| Method | Path                                         | Success | Errors |
+|--------|----------------------------------------------|---------|--------|
+| GET    | `/api/health`                                | 200 `{ ok, engine }` | — |
+| GET    | `/api/patients?q=&firstName=&lastName=&dob=&phone=` | 200 | 400 |
+| GET    | `/api/patients/{id}`                         | 200 context | 404 |
+| POST   | `/api/patients`                              | 201 | 400 |
+| GET    | `/api/prescriptions?status=&reviewStatus=&limit=` | 200 list | 400 |
+| GET    | `/api/prescriptions/{id}`                    | 200 detail | 404 |
+| GET    | `/api/prescriptions/{id}/file`               | 200 file | 404 |
+| POST   | `/api/prescriptions/upload` (multipart)      | 202 | 400, 415 |
+| POST   | `/api/prescriptions/text`                    | 202 | 400 |
+| POST   | `/api/prescriptions/extract` (multipart)     | 200 `{ scriptData, extraction }` | 422, 501 |
+| GET    | `/api/scenarios`                             | 200 | — |
+| POST   | `/api/prescriptions/simulate`                | 202 | 404, 409 |
+| POST   | `/api/prescriptions/{id}/retry`              | 202 | 404 |
+| POST   | `/api/prescriptions/{id}/reviews`            | 200 detail | 400, 404, 409 |
+| GET    | `/api/stats`                                 | 200 | — |
+| GET    | `/api/events`                                | SSE | — |
+| POST   | `/api/internal/prescriptions/{id}/engine-callback` | 200 | 400, 404 |
 
-Error body: `{ "code": "...", "message": "..." }`.
+RX Engine: `GET /health`, `GET /references`, `POST /analyze` (202), `POST /extract`.
 
-## Frontend Design (`autoscript-ui` — scaffolded, UI not yet built)
+## Frontend Design (`autoscript-ui`)
 
-The frontend is a separate React 19 + TypeScript single-page app built with Vite, living
-in the sibling `autoscript-ui/` directory. It is a thin client over the existing REST API.
+Single-page app (`src/App.tsx`) with a sidebar: Dashboard, Prescriptions, Patients, Reviews,
+Analytics, Settings. Data access lives in `src/api/` (typed `http` client, `patients.ts`,
+`prescriptions.ts`, `types.ts` mirroring the shared contracts); `usePrescriptions` polls the
+list and stats.
 
-Current state:
-- The Vite project is scaffolded with React, TypeScript, and ESLint.
-- `vite.config.ts` runs the dev server on port 5173 and proxies `/api/*` to the Spring
-  Boot backend on `http://localhost:8080`, so the browser calls `/api/...` without CORS
-  setup during development.
-- `App.tsx` is still the default Vite starter; none of the screens below exist yet.
-
-Build/serve model: in development the Vite dev server (5173) proxies to Boot (8080). For a
-single-artifact deployment, `npm run build` emits static assets to `autoscript-ui/dist`,
-which can be served by Spring Boot or any static host; this wiring is not set up yet.
-
-### Screens / flows
-1. **Upload & Review**
-   - File picker → client-side guard (type ∈ {jpeg, png, pdf}, ≤ 10 MB).
-   - On select: `POST /autofill`; render an editable form bound to `ScriptData`; null →
-     empty input.
-   - Submit: build multipart with the original image + edited `scriptData` JSON part;
-     `POST /review`; render flags grouped by field, or a clear "no mismatches" state.
-   - Error handling: show `ErrorResponse.message`; style 422 as "fix input" and 502 as
-     "service problem, retry".
-2. **Dashboard**
-   - Three lists from `/queued`, `/in-review`, `/completed`, each rendering
-     `ScriptSummary` (id, status, timestamps, drug, quantity, flag count).
-   - Completed rows link to a result view using `/{id}/result`.
-
-### Screens / flows (target for `autoscript-ui`)
-1. **Upload & Review**
-   - File picker → client-side guard (type ∈ {jpeg, png, pdf}, ≤ 10 MB).
-   - On select: `POST /autofill`; render an editable form bound to `ScriptData`; null →
-     empty input. Disable Autofill and show a spinner while the request is in flight.
-   - Submit: build multipart with the original image + edited `scriptData` JSON part;
-     `POST /review`; render flags grouped by field, or a clear "no mismatches" state.
-   - Error handling: show `ErrorResponse.message`; style 422 as "fix input" and 502 as
-     "service problem, retry".
-2. **Dashboard** (`/dashboard` route)
-   - Three sections from `/queued`, `/in-review`, `/completed`, each rendering
-     `ScriptSummary` (id, status, timestamps, drug, quantity, flag count) with an explicit
-     empty-state message when a section has no scripts.
-   - Completed rows link to a result view using `/{id}/result`.
-
-### Client considerations
-- Serialize `LocalDate` as `YYYY-MM-DD` and integers as numbers in the `scriptData` part.
-- The `scriptData` part must be sent with JSON content type so the controller's
-  `@RequestPart ScriptData` binds correctly.
-- Because state is in-memory, the dashboard reflects only the current server run.
+1. **Intake (UploadModal)** — script picker (JPEG/PNG/PDF), patient lookup or creation
+   (allergies or NKDA, conditions, medications), entry form, Autofill via
+   `/api/prescriptions/extract`, submit via `/api/prescriptions/upload`.
+2. **Prescription detail** (`components/PrescriptionDetail.tsx`) — live stage/percent while
+   processing; disposition and reason; findings by severity with cited evidence, AI context and
+   review questions; AI summary; entered-vs-script table; review actions and history; retry
+   for failures; original file preview.
+3. **Dashboard** — status tiles (Manual Review Needed, No Flags Detected, Processing, Reviewed
+   Today) and recent prescriptions.
+4. **Prescriptions** — searchable list. **Patients** — field lookup and create.
+5. **Reviews** — work queue of screened prescriptions awaiting pharmacist action.
+6. **Analytics** — totals, findings raised, interventions required, failed screenings.
+7. **Settings** — backend configuration notes (LLM key location, services).
 
 ## Error Handling Strategy
 
-- Validation failures are client-correctable (422, image codes).
-- Upstream/model failures are transient/server-side (502, extraction/review codes).
-- Lifecycle guard methods throw `IllegalStateException` on illegal transitions; these are
-  internal invariants, not part of the external contract.
+- Client-correctable input → 400 / 415 / 422 with a message (and `code` for autofill).
+- Unknown ids → 404; review while processing → 409.
+- Unexpected errors → generic 500 without internals.
+- Engine failures are never hidden: they become `FAILED` with a `failureReason`, or, for the AI
+  pass, a `SYSTEM_LIMITATION` finding plus manual review.
 
 ## Testing Strategy
 
-- **Controller**: `@WebMvcTest` + `MockMvc`, mocking the two services. Verify status
-  codes, multipart binding, and the exception-to-`ErrorResponse` mappings.
-- **ExtractionService**: unit tests for each validation branch (missing, too large,
-  unsupported type, happy path with a mocked `PrescriptionExtractionModel`), and wrapping
-  of model exceptions into `ExtractionFailedException`.
-- **ScriptValidationService**: table-driven tests over match/mismatch for text, digits,
-  and value fields, including whitespace/case normalization and digit stripping, and
-  blank-vs-null equivalence.
-- **ScriptReviewService**: lifecycle tests — success path marks COMPLETED and pops;
-  invalid image marks REVIEW_FAILED and rethrows; other failure wraps in
-  `ReviewFailedException`; queued/in-review/completed ordering.
-- **ScriptQueue / Script**: transition legality and status filtering.
-- **PromptProvider**: selection by configured index, fallback to lowest, missing-prompt
-  and no-prompt error cases.
+- **clinical-rules** (vitest): table-driven tests per rule, entry verification fields,
+  therapy context, and the disposition policy.
+- **rx-engine** (vitest, fake LLM): pipeline stages and callbacks, extraction (including PDFs
+  without a text layer), reliability (deadlines, single terminal callback), example retrieval,
+  dataset builders and evaluation metrics/leakage checks.
+- **api** (vitest against `autoscript_test` on :5433): health, patients, upload/text intake,
+  engine callbacks, review transitions and stats, stale sweeper, error contract, demo reset.
 
-## Known Limitations (reflected intentionally)
+## Known Limitations
 
-- No persistence, auth, or horizontal scaling; restart loses state.
-- `/review` is synchronous; the queue is not drained by a background worker even though
-  `pull()` and `hasQueued()` exist.
-- No endpoint returns the full `Script`; only its `ReviewResult`.
-- `Script.setData` is unused in the current flow.
+- No authentication; single-pharmacy demo data.
+- Curated rule tables and 17 reference documents; coverage is listed in `COVERAGE.md`.
+- The UI refreshes by polling; the SSE stream is available but not yet consumed by the client.

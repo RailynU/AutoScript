@@ -1,4 +1,5 @@
-param([int[]]$Ports = @(8080))
+# Frees the API (:8080) and RX Engine (:4210) ports. Pass -Ports to target others (e.g. 5173).
+param([int[]]$Ports = @(8080, 4210))
 $log = Join-Path $PSScriptRoot 'kill-port.log'
 "run $(Get-Date -Format s)" | Set-Content $log
 foreach ($p in $Ports) {
