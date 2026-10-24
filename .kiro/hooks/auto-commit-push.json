@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Auto Commit and Push on Turn End",
+      "trigger": "Stop",
+      "description": "After an agent turn completes, stage all changes, commit with a timestamped message, and push to the current branch's origin. Bundles source and generated test changes into one commit.",
+      "action": {
+        "type": "command",
+        "command": "cd \"$(git rev-parse --show-toplevel)\" && git add -A && (git diff --cached --quiet || git commit -m \"chore: auto-commit ($(date '+%Y-%m-%d %H:%M:%S'))\") && git push origin \"$(git rev-parse --abbrev-ref HEAD)\"",
+        "timeout": 120
+      }
+    }
+  ]
+}
