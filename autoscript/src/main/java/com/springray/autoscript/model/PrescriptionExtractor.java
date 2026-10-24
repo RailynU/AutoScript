@@ -1,7 +1,8 @@
 package com.springray.autoscript.model;
 
-import com.springray.autoscript.dto.ScriptData;
 import org.springframework.web.multipart.MultipartFile;
+
+import com.springray.autoscript.dto.ScriptData;
 
 /**
  * Extracts structured {@link ScriptData} from an uploaded prescription image.
@@ -10,8 +11,8 @@ import org.springframework.web.multipart.MultipartFile;
  * <ul>
  *   <li>{@link PrescriptionExtractionModel} — real OpenAI vision extraction, active when
  *       {@code autoscript.ai.mode=openai} (the default when AI is enabled).</li>
- *   <li>{@link StubPrescriptionExtractionModel} — deterministic sample data for local
- *       development without an OpenAI key, active when {@code autoscript.ai.mode=stub}.</li>
+ *   <li>{@link TesseractExtractionModel} — offline OCR extraction that reads the uploaded
+ *       image locally, active when {@code autoscript.ai.mode=tesseract}. No API key.</li>
  * </ul>
  */
 public interface PrescriptionExtractor {
