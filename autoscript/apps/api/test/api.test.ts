@@ -410,10 +410,10 @@ describe("error handling", () => {
   it("answers an unexpected throw with a generic {error}, keeps 4xx messages, and reports validation issues", async () => {
     const env = loadEnv({ DATABASE_URL: TEST_DB, UPLOAD_DIR: uploadDir, API_URL: "http://localhost:4110" });
     const second = await buildServer({ env, db, engine, logger: false, sweeper: false });
-    second.get("/boom", async () => {
+    second.get("/api/boom", async () => {
       throw new Error("secret internal detail from /Users/someone/file.ts:12");
     });
-    second.get("/teapot", async () => {
+    second.get("/api/teapot", async () => {
       throw Object.assign(new Error("I am a teapot"), { statusCode: 418 });
     });
     try {
