@@ -84,11 +84,13 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- In-memory DB for tests (so the context-load test needs no local Postgres) -->
+        <!-- In-memory DB for tests and the `local` dev profile (so the app can boot
+             without a local Postgres). `provided` keeps it on the test + spring-boot:run
+             runtime classpath while excluding it from the packaged production jar. -->
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
-            <scope>test</scope>
+            <scope>provided</scope>
         </dependency>
     </dependencies>
 
